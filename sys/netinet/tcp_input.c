@@ -4879,16 +4879,14 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
     int ioptlen, struct tcp_opt_info *ioi)
 {
 	struct tcpcb tb, *tp;
-	long win;
 	struct mbuf *ipopts;
 	struct tcp_opt_info opti;
-	int s;
 #ifdef INET6
 	struct rtentry *rt;
 #endif
 	struct route *ro;
 	u_int8_t *optp;
-	int roptlen, error;
+	int optlen, error;
 	u_int16_t tlen;
 	struct ip *ip = NULL;
 #ifdef INET6
@@ -4897,6 +4895,7 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	struct tcphdr *th;
 	u_int hlen;
 	u_int16_t ourmaxseg;
+	long ourwin;
 
 	tp = sototcpcb(so);
 
@@ -4933,9 +4932,9 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	 */
 
 #ifdef TCP_SIGNATURE
-	if (optp || (tp->t_flags & TF_SIGNATURE))
+	if (ioptp || (tp->t_flags & TF_SIGNATURE))
 #else
-	if (optp)
+	if (ioptp)
 #endif
 	{
 		tb.t_flags = tcp_do_rfc1323 ? (TF_REQ_SCALE|TF_REQ_TSTMP) : 0;
@@ -4952,7 +4951,7 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	/* Do this before we free the mbuf from the sender. */
 	ourmaxseg = tcp_mss_to_advertise(m->m_flags & M_PKTHDR ?
 						m->m_pkthdr.rcvif : NULL,
-						src.sa.sa_family);
+						src->sa_family);
 
 	/* syn_cache_add gets ro from sc->route, ie, cached
 	 * routing information in the syncache entry. We don't
@@ -4963,7 +4962,7 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	 * now. -- je 20110716
 	 */
 	ro = NULL;
-	switch (src.sa.sa_family) {
+	switch (src->sa_family) {
 	case AF_INET:
 		hlen = sizeof(struct ip);
 		break;
@@ -5015,29 +5014,29 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	m->m_pkthdr.rcvif = NULL;
 	memset(mtod(m, u_char *), 0, tlen);
 
-	switch (src.sa.sa_family) {
+	switch (src->sa_family) {
 /* Should this get an #ifdef INET ? --je */
 	case AF_INET:
 		ip = mtod(m, struct ip *);
 		ip->ip_v = 4;
-		ip->ip_dst = src.sin.sin_addr;
-		ip->ip_src = dst.sin.sin_addr;
+		ip->ip_dst = ((struct sockaddr_in *) src)->sin_addr;
+		ip->ip_src = ((struct sockaddr_in *) dst)->sin_addr;
 		ip->ip_p = IPPROTO_TCP;
 		th = (struct tcphdr *)(ip + 1);
-		th->th_dport = src.sin.sin_port;
-		th->th_sport = dst.sin.sin_port;
+		th->th_dport = ((struct sockaddr_in *) src)->sin_port;
+		th->th_sport = ((struct sockaddr_in *) dst)->sin_port;
 		break;
 #ifdef INET6
 	case AF_INET6:
 		ip6 = mtod(m, struct ip6_hdr *);
 		ip6->ip6_vfc = IPV6_VERSION;
-		ip6->ip6_dst = src.sin6.sin6_addr;
-		ip6->ip6_src = dst.sin6.sin6_addr;
+		ip6->ip6_dst = ((struct sockaddr_in6 *) src)->sin6_addr;
+		ip6->ip6_src = ((struct sockaddr_in6 *) dst)->sin6_addr;
 		ip6->ip6_nxt = IPPROTO_TCP;
 		/* ip6_plen will be updated in ip6_output() */
 		th = (struct tcphdr *)(ip6 + 1);
-		th->th_dport = src.sin6.sin6_port;
-		th->th_sport = dst.sin6.sin6_port;
+		th->th_dport = ((struct sockaddr_in6 *) src)->sin6_port;
+		th->th_sport = ((struct sockaddr_in6 *) dst)->sin6_port;
 		break;
 #endif
 	default:
@@ -5055,9 +5054,12 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	th->th_off = (sizeof(struct tcphdr) + optlen) >> 2;
 	th->th_flags = TH_SYN|TH_ACK;
 
-	th->win = sbspace(&so->so_rcv);
-	if (th->win > TCP_MAXWIN)
-		th->win = TCP_MAXWIN;
+	/* Variable storage size differences here are intentional in
+	 * that it's done this way in syn_cache_add/reply. --je */
+	ourwin = sbspace(&so->so_rcv);
+	if (ourwin > TCP_MAXWIN)
+		ourwin = TCP_MAXWIN;
+	th->th_win = htons(ourwin);
 	/* th_sum already 0 */
 	/* th_urp already 0 */
 
@@ -5065,8 +5067,8 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	optp = (u_int8_t *)(th + 1);
 	*optp++ = TCPOPT_MAXSEG;
 	*optp++ = 4;
-	*optp++ = (sc->sc_ourmaxseg >> 8) & 0xff;
-	*optp++ = sc->sc_ourmaxseg & 0xff;
+	*optp++ = (ourmaxseg >> 8) & 0xff;
+	*optp++ = ourmaxseg & 0xff;
 
 	if (tb.t_flags & (TF_RCVD_SCALE|TF_REQ_SCALE)) {
 		u_int8_t our_request_r_scale = 0;
@@ -5102,7 +5104,7 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 		u_int32_t *lp = (u_int32_t *)(optp);
 		/* Form timestamp option as shown in appendix A of RFC 1323. */
 		*lp++ = htonl(TCPOPT_TSTAMP_HDR);
-		*lp++ = (oi->maxseg << 16) | tb.requested_s_scale;
+		*lp++ = (ioi->maxseg << 16) | tb.requested_s_scale;
 		*lp   = htonl(tb.ts_recent);
 		optp += TCPOLEN_TSTAMP_APPA;
 	}
@@ -5160,7 +5162,7 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 		 * Page 4 and 6, January 2006.
 		 */
 
-		switch (src.sa.sa_family) {
+		switch (src->sa_family) {
 #ifdef INET
 		case AF_INET:
 			ip->ip_tos |= IPTOS_ECN_ECT0;
@@ -5213,7 +5215,7 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 #endif
 
 	/* Compute the packet's checksum. */
-	switch (src.sa.sa_family) {
+	switch (src->sa_family) {
 	case AF_INET:
 		ip->ip_len = htons(tlen - hlen);
 		th->th_sum = 0;
@@ -5232,7 +5234,7 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	 * Fill in some straggling IP bits.  Note the stack expects
 	 * ip_len to be in host order, for convenience.
 	 */
-	switch (src.sa.sa_family) {
+	switch (src->sa_family) {
 #ifdef INET
 	case AF_INET:
 		ip->ip_len = htons(tlen);
@@ -5257,7 +5259,7 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	tp = sc->sc_tp;
 	 */
 
-	switch (src.sa.sa_family) {
+	switch (src->sa_family) {
 #ifdef INET
 	case AF_INET:
 		error = ip_output(m, ipopts, ro,
