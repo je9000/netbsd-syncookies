@@ -744,7 +744,8 @@ struct syn_cache_head {
 #define	TCPCTL_DEBX		32	/* # of tcp debug sockets */
 #define	TCPCTL_DROP		33	/* drop tcp connection */
 #define	TCPCTL_MSL		34	/* Max Segment Life */
-#define	TCPCTL_MAXID		35
+#define	TCPCTL_SYN_COOKIES	35 	/* use tcp syn cookies */
+#define	TCPCTL_MAXID		36
 
 #define	TCPCTL_NAMES { \
 	{ 0, 0 }, \
@@ -782,6 +783,7 @@ struct syn_cache_head {
 	{ "debx", CTLTYPE_INT }, \
 	{ "drop", CTLTYPE_STRUCT }, \
 	{ "msl", CTLTYPE_INT }, \
+	{ "syn_cookies", CTLTYPE_INT }, \
 }
 
 #ifdef _KERNEL
@@ -806,6 +808,7 @@ extern	int tcp_syn_bucket_limit;/* max entries per hash bucket */
 extern	int tcp_log_refused;	/* log refused connections */
 extern	int tcp_do_ecn;		/* TCP ECN enabled/disabled? */
 extern	int tcp_ecn_maxretries;	/* Max ECN setup retries */
+extern	int tcp_syn_cookies;	/* use tcp syncookies */
 #if NRND > 0
 extern	int tcp_do_rfc1948;	/* ISS by cryptographic hash */
 #endif
@@ -880,6 +883,14 @@ extern int tcp_autosndbuf_max;
 	{ 1, 0, &tcp_delack_ticks },		\
 	{ 1, 0, &tcp_init_win_local },		\
 	{ 1, 0, &tcp_ackdrop_ppslim },		\
+	{ 0 },					\
+	{ 0 },					\
+	{ 0 },					\
+	{ 0 },					\
+	{ 0 },					\
+	{ 0 },					\
+	{ 0 },					\
+	{ 1, 0, &syn_cookies },		\
 }
 
 struct secasvar;
@@ -977,9 +988,18 @@ void	 tcp_statadd(u_int, uint64_t);
 int	 syn_cache_add(struct sockaddr *, struct sockaddr *,
 		struct tcphdr *, unsigned int, struct socket *,
 		struct mbuf *, u_char *, int, struct tcp_opt_info *);
+int	 syn_cookie_reply(struct sockaddr *, struct sockaddr *,
+		struct tcphdr *, unsigned int, struct socket *,
+		struct mbuf *, u_char *, int, struct tcp_opt_info *);
 void	 syn_cache_unreach(const struct sockaddr *, const struct sockaddr *,
 	   struct tcphdr *);
 struct socket *syn_cache_get(struct sockaddr *, struct sockaddr *,
+		struct tcphdr *, unsigned int, unsigned int,
+		struct socket *so, struct mbuf *);
+struct socket *syn_cache_promote(struct sockaddr *, struct sockaddr *,
+		struct tcphdr *, unsigned int, unsigned int,
+		struct socket *so, struct mbuf *, struct syn_cache *);
+struct socket *syn_cookie_validate(struct sockaddr *, struct sockaddr *,
 		struct tcphdr *, unsigned int, unsigned int,
 		struct socket *so, struct mbuf *);
 void	 syn_cache_init(void);

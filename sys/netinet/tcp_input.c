@@ -243,6 +243,7 @@ __KERNEL_RCSID(0, "$NetBSD: tcp_input.c,v 1.314 2011/05/25 23:20:57 gdt Exp $");
 
 int	tcprexmtthresh = 3;
 int	tcp_log_refused;
+int	tcp_syn_cookies;
 
 int	tcp_do_autorcvbuf = 1;
 int	tcp_autorcvbuf_inc = 16 * 1024;
@@ -1680,6 +1681,9 @@ findpcb:
 				} else if (tiflags & TH_ACK) {
 					so = syn_cache_get(&src.sa, &dst.sa,
 						th, toff, tlen, so, m);
+					if (so == NULL)
+						so = syn_cookie_validate(&src.sa, &dst.sa,
+	                        th, toff, tlen, so, m);
 					if (so == NULL) {
 						/*
 						 * We don't have a SYN for
@@ -1861,10 +1865,17 @@ findpcb:
 				 * SYN looks ok; create compressed TCP
 				 * state for it.
 				 */
-				if (so->so_qlen <= so->so_qlimit &&
-				    syn_cache_add(&src.sa, &dst.sa, th, tlen,
-						so, m, optp, optlen, &opti))
-					m = NULL;
+				if (so->so_qlen <= so->so_qlimit) {
+					if ( tcp_syn_cookies ) {
+						if (syn_cookie_reply(&src.sa, &dst.sa, th, tlen,
+							so, m, optp, optlen, &opti))
+						m = NULL;
+					} else { /* tcp_syn_cookies */
+					    if (syn_cache_add(&src.sa, &dst.sa, th, tlen,
+							so, m, optp, optlen, &opti))
+						m = NULL;
+					}
+				}
 			}
 			goto drop;
 		}
@@ -3948,14 +3959,7 @@ syn_cache_get(struct sockaddr *src, struct sockaddr *dst,
 {
 	struct syn_cache *sc;
 	struct syn_cache_head *scp;
-	struct inpcb *inp = NULL;
-#ifdef INET6
-	struct in6pcb *in6p = NULL;
-#endif
-	struct tcpcb *tp = 0;
-	struct mbuf *am;
 	int s;
-	struct socket *oso;
 
 	s = splsoftnet();
 	if ((sc = syn_cache_lookup(src, dst, &scp)) == NULL) {
@@ -3978,6 +3982,22 @@ syn_cache_get(struct sockaddr *src, struct sockaddr *dst,
 	/* Remove this cache entry */
 	syn_cache_rm(sc);
 	splx(s);
+	return syn_cache_promote(src, dst, th, hlen, tlen, so, m, sc);
+}
+
+struct socket *
+syn_cache_promote(struct sockaddr *src, struct sockaddr *dst,
+    struct tcphdr *th, unsigned int hlen, unsigned int tlen,
+    struct socket *so, struct mbuf *m, struct syn_cache *sc)
+{
+	struct inpcb *inp = NULL;
+#ifdef INET6
+	struct in6pcb *in6p = NULL;
+#endif
+	struct tcpcb *tp = 0;
+	struct mbuf *am;
+	int s;
+	struct socket *oso;
 
 	/*
 	 * Ok, create the full blown connection, and set things up
@@ -4837,4 +4857,109 @@ syn_cache_respond(struct syn_cache *sc, struct mbuf *m)
 		break;
 	}
 	return (error);
+}
+
+
+/* TCP SYN COKIES BELOW!!!!!!!!
+
+vvvvvvvvvvvvvvvvvvvvv
+*/
+
+int
+syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
+    unsigned int hlen, struct socket *so, struct mbuf *m, u_char *optp,
+    int optlen, struct tcp_opt_info *oi)
+{
+	struct tcpcb tb, *tp;
+	long win;
+	struct mbuf *ipopts;
+	struct tcp_opt_info opti;
+	int s;
+
+	tp = sototcpcb(so);
+
+	memset(&opti, 0, sizeof(opti));
+
+	/*
+	 * RFC1122 4.2.3.10, p. 104: discard bcast/mcast SYN
+	 *
+	 * Note this check is performed in tcp_input() very early on.
+	 */
+
+	/*
+	 * Initialize some local state.
+	 */
+	win = sbspace(&so->so_rcv);
+	if (win > TCP_MAXWIN)
+		win = TCP_MAXWIN;
+
+	switch (src->sa_family) {
+#ifdef INET
+	case AF_INET:
+		/*
+		 * Remember the IP options, if any.
+		 */
+		ipopts = ip_srcroute();
+		break;
+#endif
+	default:
+		ipopts = NULL;
+	}
+
+#ifdef TCP_SIGNATURE
+	if (optp || (tp->t_flags & TF_SIGNATURE))
+#else
+	if (optp)
+#endif
+	{
+		tb.t_flags = tcp_do_rfc1323 ? (TF_REQ_SCALE|TF_REQ_TSTMP) : 0;
+#ifdef TCP_SIGNATURE
+		tb.t_flags |= (tp->t_flags & TF_SIGNATURE);
+#endif
+		tb.t_state = TCPS_LISTEN;
+		if (tcp_dooptions(&tb, optp, optlen, th, m, m->m_pkthdr.len -
+		    sizeof(struct tcphdr) - optlen - hlen, oi) < 0)
+			return (0);
+	} else
+		tb.t_flags = 0;
+
+
+	/*
+	 * ECN setup packet recieved.
+      ??? we need to reply with this if he sent it.
+	 */
+
+#ifdef TCP_SIGNATURE
+	if (tb.t_flags & TF_SIGNATURE)
+		sc->sc_flags |= SCF_SIGNATURE;
+#endif
+	sc->sc_tp = tp;
+	if (syn_cache_respond(sc, m) == 0) {
+		uint64_t *tcps = TCP_STAT_GETREF();
+		tcps[TCP_STAT_SNDACKS]++;
+		tcps[TCP_STAT_SNDTOTAL]++;
+		TCP_STAT_PUTREF();
+		syn_cache_insert(sc, tp);
+	} else {
+		s = splsoftnet();
+		/*
+		 * syn_cache_put() will try to schedule the timer, so
+		 * we need to initialize it
+		 */
+		SYN_CACHE_TIMER_ARM(sc);
+		syn_cache_put(sc);
+		splx(s);
+		TCP_STATINC(TCP_STAT_SC_DROPPED);
+	}
+	return (1);
+}
+
+struct socket *
+syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
+    struct tcphdr *th, unsigned int hlen, unsigned int tlen,
+    struct socket *so, struct mbuf *m)
+{
+	// Create a new sc so promote can turn that into a real syn table entry
+	//return syn_cookie_promote();
+	return NULL;
 }

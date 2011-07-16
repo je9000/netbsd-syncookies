@@ -1894,6 +1894,12 @@ sysctl_net_inet_tcp_setup2(struct sysctllog **clog, int pf, const char *pfname,
 		       SYSCTL_DESCR("Ticks before initial tcp connection times out"),
 		       sysctl_tcp_keep, 0, &tcp_keepinit, 0,
 		       CTL_NET, pf, IPPROTO_TCP, CTL_CREATE, CTL_EOL);
+	sysctl_createv(clog, 0, NULL, NULL,
+		       CTLFLAG_PERMANENT|CTLFLAG_READWRITE,
+		       CTLTYPE_INT, "syn_cookies",
+		       SYSCTL_DESCR("Enable sending TCP SYN cookies"),
+		       sysctl_tcp_keep, 0, &tcp_syn_cookies, 0,
+		       CTL_NET, pf, IPPROTO_TCP, CTL_CREATE, CTL_EOL);
 
 	/* TCP socket buffers auto-sizing nodes */
 	sysctl_createv(clog, 0, NULL, NULL,
