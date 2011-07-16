@@ -1002,6 +1002,7 @@ struct socket *syn_cache_promote(struct sockaddr *, struct sockaddr *,
 struct socket *syn_cookie_validate(struct sockaddr *, struct sockaddr *,
 		struct tcphdr *, unsigned int, unsigned int,
 		struct socket *so, struct mbuf *);
+tcp_seq syn_cookie_seq(struct sockaddr *, struct sockaddr *);
 void	 syn_cache_init(void);
 void	 syn_cache_insert(struct syn_cache *, struct tcpcb *);
 struct syn_cache *syn_cache_lookup(const struct sockaddr *, const struct sockaddr *,

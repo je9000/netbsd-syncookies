@@ -4896,6 +4896,7 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 #endif
 	struct tcphdr *th;
 	u_int hlen;
+	u_int16_t ourmaxseg;
 
 	tp = sototcpcb(so);
 
@@ -4948,6 +4949,11 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	} else
 		tb.t_flags = 0;
 
+	/* Do this before we free the mbuf from the sender. */
+	ourmaxseg = tcp_mss_to_advertise(m->m_flags & M_PKTHDR ?
+						m->m_pkthdr.rcvif : NULL,
+						src.sa.sa_family);
+
 	/* syn_cache_add gets ro from sc->route, ie, cached
 	 * routing information in the syncache entry. We don't
 	 * have a syncache table entry. I don't see anwhere where
@@ -4973,8 +4979,8 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	}
 
 	/* Compute the size of the TCP options. */
-	optlen = 4 + (sc->sc_request_r_scale != 15 ? 4 : 0) +
-	    ((tb.t_flags & TF_SACK_PERMIT) ? (TCPOLEN_SACK_PERMITTED + 2) : 0) +
+	optlen = 4 + (tb.t_flags & (TF_RCVD_SCALE|TF_REQ_SCALE) ? 4 : 0) +
+	    ((tb.t_flags & TF_SACK_PERMIT) && tcp_do_sack ? (TCPOLEN_SACK_PERMITTED + 2) : 0) +
 #ifdef TCP_SIGNATURE
 	    ((tb.t_flags & TF_SIGNATURE) ? (TCPOLEN_SIGNATURE + 2) : 0) +
 #endif
@@ -5002,58 +5008,56 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	if (m == NULL)
 		return (ENOBUFS);
 	MCLAIM(m, &tcp_tx_mowner);
-// XXX je done to here
+
 	/* Fixup the mbuf. */
 	m->m_data += max_linkhdr;
 	m->m_len = m->m_pkthdr.len = tlen;
-	if (sc->sc_tp) {
-		tp = sc->sc_tp;
-		if (tp->t_inpcb)
-			so = tp->t_inpcb->inp_socket;
-#ifdef INET6
-		else if (tp->t_in6pcb)
-			so = tp->t_in6pcb->in6p_socket;
-#endif
-		else
-			so = NULL;
-	} else
-		so = NULL;
 	m->m_pkthdr.rcvif = NULL;
 	memset(mtod(m, u_char *), 0, tlen);
 
-	switch (sc->sc_src.sa.sa_family) {
+	switch (src.sa.sa_family) {
+/* Should this get an #ifdef INET ? --je */
 	case AF_INET:
 		ip = mtod(m, struct ip *);
 		ip->ip_v = 4;
-		ip->ip_dst = sc->sc_src.sin.sin_addr;
-		ip->ip_src = sc->sc_dst.sin.sin_addr;
+		ip->ip_dst = src.sin.sin_addr;
+		ip->ip_src = dst.sin.sin_addr;
 		ip->ip_p = IPPROTO_TCP;
 		th = (struct tcphdr *)(ip + 1);
-		th->th_dport = sc->sc_src.sin.sin_port;
-		th->th_sport = sc->sc_dst.sin.sin_port;
+		th->th_dport = src.sin.sin_port;
+		th->th_sport = dst.sin.sin_port;
 		break;
 #ifdef INET6
 	case AF_INET6:
 		ip6 = mtod(m, struct ip6_hdr *);
 		ip6->ip6_vfc = IPV6_VERSION;
-		ip6->ip6_dst = sc->sc_src.sin6.sin6_addr;
-		ip6->ip6_src = sc->sc_dst.sin6.sin6_addr;
+		ip6->ip6_dst = src.sin6.sin6_addr;
+		ip6->ip6_src = dst.sin6.sin6_addr;
 		ip6->ip6_nxt = IPPROTO_TCP;
 		/* ip6_plen will be updated in ip6_output() */
 		th = (struct tcphdr *)(ip6 + 1);
-		th->th_dport = sc->sc_src.sin6.sin6_port;
-		th->th_sport = sc->sc_dst.sin6.sin6_port;
+		th->th_dport = src.sin6.sin6_port;
+		th->th_sport = dst.sin6.sin6_port;
 		break;
 #endif
 	default:
+		/* If we hit this point we'll cause a panic later on
+		 * when we try and dereference th. This code is
+		 * present in syn_cache_reply too, so it probably
+		 * needs to be corrected in both locations. --je
+		 */ 
 		th = NULL;
 	}
 
-	th->th_seq = htonl(sc->sc_iss);
-	th->th_ack = htonl(sc->sc_irs + 1);
+	th->th_seq = syn_cookie_seq(src, dst);
+
+	th->th_ack = htonl(ith->th_seq + 1);
 	th->th_off = (sizeof(struct tcphdr) + optlen) >> 2;
 	th->th_flags = TH_SYN|TH_ACK;
-	th->th_win = htons(sc->sc_win);
+
+	th->win = sbspace(&so->so_rcv);
+	if (th->win > TCP_MAXWIN)
+		th->win = TCP_MAXWIN;
 	/* th_sum already 0 */
 	/* th_urp already 0 */
 
@@ -5064,23 +5068,46 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	*optp++ = (sc->sc_ourmaxseg >> 8) & 0xff;
 	*optp++ = sc->sc_ourmaxseg & 0xff;
 
-	if (sc->sc_request_r_scale != 15) {
+	if (tb.t_flags & (TF_RCVD_SCALE|TF_REQ_SCALE)) {
+		u_int8_t our_request_r_scale = 0;
+		/* Shouldn't this value be acached? How often does
+		 * sb_max change? --je
+		 */
+		while (our_request_r_scale < TCP_MAX_WINSHIFT &&
+		    (TCP_MAXWIN << our_request_r_scale) < sb_max)
+			our_request_r_scale++;
+
 		*((u_int32_t *)optp) = htonl(TCPOPT_NOP << 24 |
 		    TCPOPT_WINDOW << 16 | TCPOLEN_WINDOW << 8 |
-		    sc->sc_request_r_scale);
+		    our_request_r_scale);
 		optp += 4;
 	}
 
-	if (sc->sc_flags & SCF_TIMESTAMP) {
+	/* Store stuff here! This is just a test. maxseg is
+	 * 16 bits and requested_s_scale requires 4 (RFC 1323
+	 * states the field is 8 bits in size, but the field
+	 * maximum value is limited to 14, which can be
+	 * encoded in 4 bits), that leaves us 4 more bits to
+	 * work with.
+	 * Note that we don't call htonl() on the value but
+	 * doing so would prevent leak architecture endianness
+	 * to the client.
+	 *
+	 * Maybe we should violate the RFC and send a ts
+	 * regardless, since it's so useful to us. Does that
+	 * actually violate the RFC? I'm not completely sure...
+	 * --je
+	 */
+	if (tb.t_flags & (TF_REQ_TSTMP|TF_RCVD_TSTMP)) {
 		u_int32_t *lp = (u_int32_t *)(optp);
 		/* Form timestamp option as shown in appendix A of RFC 1323. */
 		*lp++ = htonl(TCPOPT_TSTAMP_HDR);
-		*lp++ = htonl(SYN_CACHE_TIMESTAMP(sc));
-		*lp   = htonl(sc->sc_timestamp);
+		*lp++ = (oi->maxseg << 16) | tb.requested_s_scale;
+		*lp   = htonl(tb.ts_recent);
 		optp += TCPOLEN_TSTAMP_APPA;
 	}
 
-	if (sc->sc_flags & SCF_SACK_PERMIT) {
+	if ((tb.t_flags & TF_SACK_PERMIT) && tcp_do_sack) {
 		u_int8_t *p = optp;
 
 		/* Let the peer know that we will SACK. */
@@ -5097,8 +5124,16 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	 * with ECE and CWR set, we must not assume no one will block
 	 * the ECE packet we are about to send.
 	 */
-	if ((sc->sc_flags & SCF_ECN_PERMIT) && tp &&
-	    SEQ_GEQ(tp->snd_nxt, tp->snd_max)) {
+	if ((ith->th_flags & (TH_ECE|TH_CWR)) && tcp_do_ecn
+		/* This block contains the following code in
+		 * syn_cache_reply:
+	         tp && SEQ_GEQ(tp->snd_nxt, tp->snd_max)
+		 * I'm not sure what this is checking. If the next seq
+		 * number we use is >= to the highest sent, ie, is this
+		 * a retransmit of an old packet? How could the syn+ack
+		 * ever be anything but the most recently sent packet?
+		 */
+		) {
 		th->th_flags |= TH_ECE;
 		TCP_STATINC(TCP_STAT_ECN_SHS);
 
@@ -5125,7 +5160,7 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 		 * Page 4 and 6, January 2006.
 		 */
 
-		switch (sc->sc_src.sa.sa_family) {
+		switch (src.sa.sa_family) {
 #ifdef INET
 		case AF_INET:
 			ip->ip_tos |= IPTOS_ECN_ECT0;
@@ -5140,8 +5175,9 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 		TCP_STATINC(TCP_STAT_ECN_ECT);
 	}
 
+	/* Why is there no sysctl for TCP signatures? XXX --je */
 #ifdef TCP_SIGNATURE
-	if (sc->sc_flags & SCF_SIGNATURE) {
+	if (tb.t_flags & TF_SIGNATURE) {
 		struct secasvar *sav;
 		u_int8_t *sigp;
 
@@ -5150,6 +5186,10 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 		if (sav == NULL) {
 			if (m)
 				m_freem(m);
+			/* I think this should be EAFNOSUPPORT per
+			 * tcp_signature_getsav's return conditions? XXX
+			 * --je
+			 */
 			return (EPERM);
 		}
 
@@ -5173,7 +5213,7 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 #endif
 
 	/* Compute the packet's checksum. */
-	switch (sc->sc_src.sa.sa_family) {
+	switch (src.sa.sa_family) {
 	case AF_INET:
 		ip->ip_len = htons(tlen - hlen);
 		th->th_sum = 0;
@@ -5192,7 +5232,7 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	 * Fill in some straggling IP bits.  Note the stack expects
 	 * ip_len to be in host order, for convenience.
 	 */
-	switch (sc->sc_src.sa.sa_family) {
+	switch (src.sa.sa_family) {
 #ifdef INET
 	case AF_INET:
 		ip->ip_len = htons(tlen);
@@ -5212,12 +5252,15 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	}
 
 	/* XXX use IPsec policy on listening socket, on SYN ACK */
+	/* What is the point of this? Isn't that where tp
+	 * points already? We only have one socket. --je
 	tp = sc->sc_tp;
+	 */
 
-	switch (sc->sc_src.sa.sa_family) {
+	switch (src.sa.sa_family) {
 #ifdef INET
 	case AF_INET:
-		error = ip_output(m, sc->sc_ipopts, ro,
+		error = ip_output(m, ipopts, ro,
 		    (ip_mtudisc ? IP_MTUDISC : 0),
 		    (struct ip_moptions *)NULL, so);
 		break;
@@ -5232,13 +5275,13 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 		break;
 #endif
 	default:
+		/* We're really inconsistent with the default case in
+		 * these sa_family switch statements. XXX --je
+		 */
 		error = EAFNOSUPPORT;
 		break;
 	}
 	return (error);
-
-
-	return (1);
 }
 
 struct socket *
@@ -5246,7 +5289,15 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
     struct tcphdr *th, unsigned int hlen, unsigned int tlen,
     struct socket *so, struct mbuf *m)
 {
+	// Validate the seq# is something we generated.
 	// Create a new sc so promote can turn that into a real syn table entry
 	//return syn_cookie_promote();
 	return NULL;
 }
+
+tcp_seq
+syn_cookie_seq(struct sockaddr *src, struct sockaddr *dst)
+{
+	return 1;
+}
+
