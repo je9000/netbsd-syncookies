@@ -4865,16 +4865,37 @@ syn_cache_respond(struct syn_cache *sc, struct mbuf *m)
 vvvvvvvvvvvvvvvvvvvvv
 */
 
+/* Some parameters here are prefixed with an "i" unlike
+ * similar above functions (which use standardized names).
+ * This function needs references to both the reply packet
+ * it is building and the one it is replying to, and in
+ * order to keep varaibles in code similar to
+ * syn_cache_reply, the parameters were changed to reflect
+ * they are for the "input" packet.
+ */
 int
-syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
-    unsigned int hlen, struct socket *so, struct mbuf *m, u_char *optp,
-    int optlen, struct tcp_opt_info *oi)
+syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
+    unsigned int ihlen, struct socket *so, struct mbuf *m, u_char *ioptp,
+    int ioptlen, struct tcp_opt_info *ioi)
 {
 	struct tcpcb tb, *tp;
 	long win;
 	struct mbuf *ipopts;
 	struct tcp_opt_info opti;
 	int s;
+#ifdef INET6
+	struct rtentry *rt;
+#endif
+	struct route *ro;
+	u_int8_t *optp;
+	int roptlen, error;
+	u_int16_t tlen;
+	struct ip *ip = NULL;
+#ifdef INET6
+	struct ip6_hdr *ip6 = NULL;
+#endif
+	struct tcphdr *th;
+	u_int hlen;
 
 	tp = sototcpcb(so);
 
@@ -4885,13 +4906,6 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 	 *
 	 * Note this check is performed in tcp_input() very early on.
 	 */
-
-	/*
-	 * Initialize some local state.
-	 */
-	win = sbspace(&so->so_rcv);
-	if (win > TCP_MAXWIN)
-		win = TCP_MAXWIN;
 
 	switch (src->sa_family) {
 #ifdef INET
@@ -4906,6 +4920,17 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 		ipopts = NULL;
 	}
 
+	/*
+	 * Things we conditionally need to reply with:
+	 * - ECN stuff (if the other end sent it?)
+
+	 * Don't forget to inc tcp stat counters.
+		uint64_t *tcps = TCP_STAT_GETREF();
+		tcps[TCP_STAT_SNDACKS]++;
+		tcps[TCP_STAT_SNDTOTAL]++;
+		TCP_STAT_PUTREF();
+	 */
+
 #ifdef TCP_SIGNATURE
 	if (optp || (tp->t_flags & TF_SIGNATURE))
 #else
@@ -4917,40 +4942,302 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 		tb.t_flags |= (tp->t_flags & TF_SIGNATURE);
 #endif
 		tb.t_state = TCPS_LISTEN;
-		if (tcp_dooptions(&tb, optp, optlen, th, m, m->m_pkthdr.len -
-		    sizeof(struct tcphdr) - optlen - hlen, oi) < 0)
+		if (tcp_dooptions(&tb, ioptp, ioptlen, ith, m, m->m_pkthdr.len -
+		    sizeof(struct tcphdr) - ioptlen - ihlen, ioi) < 0)
 			return (0);
 	} else
 		tb.t_flags = 0;
 
+	/* syn_cache_add gets ro from sc->route, ie, cached
+	 * routing information in the syncache entry. We don't
+	 * have a syncache table entry. I don't see anwhere where
+	 * the syncache entry could have gotten routing
+	 * information before syn_cache_reply is called, so we
+	 * will proceed without any cached route information for
+	 * now. -- je 20110716
+	 */
+	ro = NULL;
+	switch (src.sa.sa_family) {
+	case AF_INET:
+		hlen = sizeof(struct ip);
+		break;
+#ifdef INET6
+	case AF_INET6:
+		hlen = sizeof(struct ip6_hdr);
+		break;
+#endif
+	default:
+		if (m)
+			m_freem(m);
+		return (EAFNOSUPPORT);
+	}
+
+	/* Compute the size of the TCP options. */
+	optlen = 4 + (sc->sc_request_r_scale != 15 ? 4 : 0) +
+	    ((tb.t_flags & TF_SACK_PERMIT) ? (TCPOLEN_SACK_PERMITTED + 2) : 0) +
+#ifdef TCP_SIGNATURE
+	    ((tb.t_flags & TF_SIGNATURE) ? (TCPOLEN_SIGNATURE + 2) : 0) +
+#endif
+	    ((tb.t_flags & (TF_REQ_TSTMP|TF_RCVD_TSTMP)) ? TCPOLEN_TSTAMP_APPA : 0);
+
+	tlen = hlen + sizeof(struct tcphdr) + optlen;
 
 	/*
-	 * ECN setup packet recieved.
-      ??? we need to reply with this if he sent it.
+	 * Create the IP+TCP header from scratch.
 	 */
+	if (m)
+		m_freem(m);
+#ifdef DIAGNOSTIC
+	if (max_linkhdr + tlen > MCLBYTES)
+		return (ENOBUFS);
+#endif
+	MGETHDR(m, M_DONTWAIT, MT_DATA);
+	if (m && (max_linkhdr + tlen) > MHLEN) {
+		MCLGET(m, M_DONTWAIT);
+		if ((m->m_flags & M_EXT) == 0) {
+			m_freem(m);
+			m = NULL;
+		}
+	}
+	if (m == NULL)
+		return (ENOBUFS);
+	MCLAIM(m, &tcp_tx_mowner);
+// XXX je done to here
+	/* Fixup the mbuf. */
+	m->m_data += max_linkhdr;
+	m->m_len = m->m_pkthdr.len = tlen;
+	if (sc->sc_tp) {
+		tp = sc->sc_tp;
+		if (tp->t_inpcb)
+			so = tp->t_inpcb->inp_socket;
+#ifdef INET6
+		else if (tp->t_in6pcb)
+			so = tp->t_in6pcb->in6p_socket;
+#endif
+		else
+			so = NULL;
+	} else
+		so = NULL;
+	m->m_pkthdr.rcvif = NULL;
+	memset(mtod(m, u_char *), 0, tlen);
+
+	switch (sc->sc_src.sa.sa_family) {
+	case AF_INET:
+		ip = mtod(m, struct ip *);
+		ip->ip_v = 4;
+		ip->ip_dst = sc->sc_src.sin.sin_addr;
+		ip->ip_src = sc->sc_dst.sin.sin_addr;
+		ip->ip_p = IPPROTO_TCP;
+		th = (struct tcphdr *)(ip + 1);
+		th->th_dport = sc->sc_src.sin.sin_port;
+		th->th_sport = sc->sc_dst.sin.sin_port;
+		break;
+#ifdef INET6
+	case AF_INET6:
+		ip6 = mtod(m, struct ip6_hdr *);
+		ip6->ip6_vfc = IPV6_VERSION;
+		ip6->ip6_dst = sc->sc_src.sin6.sin6_addr;
+		ip6->ip6_src = sc->sc_dst.sin6.sin6_addr;
+		ip6->ip6_nxt = IPPROTO_TCP;
+		/* ip6_plen will be updated in ip6_output() */
+		th = (struct tcphdr *)(ip6 + 1);
+		th->th_dport = sc->sc_src.sin6.sin6_port;
+		th->th_sport = sc->sc_dst.sin6.sin6_port;
+		break;
+#endif
+	default:
+		th = NULL;
+	}
+
+	th->th_seq = htonl(sc->sc_iss);
+	th->th_ack = htonl(sc->sc_irs + 1);
+	th->th_off = (sizeof(struct tcphdr) + optlen) >> 2;
+	th->th_flags = TH_SYN|TH_ACK;
+	th->th_win = htons(sc->sc_win);
+	/* th_sum already 0 */
+	/* th_urp already 0 */
+
+	/* Tack on the TCP options. */
+	optp = (u_int8_t *)(th + 1);
+	*optp++ = TCPOPT_MAXSEG;
+	*optp++ = 4;
+	*optp++ = (sc->sc_ourmaxseg >> 8) & 0xff;
+	*optp++ = sc->sc_ourmaxseg & 0xff;
+
+	if (sc->sc_request_r_scale != 15) {
+		*((u_int32_t *)optp) = htonl(TCPOPT_NOP << 24 |
+		    TCPOPT_WINDOW << 16 | TCPOLEN_WINDOW << 8 |
+		    sc->sc_request_r_scale);
+		optp += 4;
+	}
+
+	if (sc->sc_flags & SCF_TIMESTAMP) {
+		u_int32_t *lp = (u_int32_t *)(optp);
+		/* Form timestamp option as shown in appendix A of RFC 1323. */
+		*lp++ = htonl(TCPOPT_TSTAMP_HDR);
+		*lp++ = htonl(SYN_CACHE_TIMESTAMP(sc));
+		*lp   = htonl(sc->sc_timestamp);
+		optp += TCPOLEN_TSTAMP_APPA;
+	}
+
+	if (sc->sc_flags & SCF_SACK_PERMIT) {
+		u_int8_t *p = optp;
+
+		/* Let the peer know that we will SACK. */
+		p[0] = TCPOPT_SACK_PERMITTED;
+		p[1] = 2;
+		p[2] = TCPOPT_NOP;
+		p[3] = TCPOPT_NOP;
+		optp += 4;
+	}
+
+	/*
+	 * Send ECN SYN-ACK setup packet.
+	 * Routes can be asymetric, so, even if we receive a packet
+	 * with ECE and CWR set, we must not assume no one will block
+	 * the ECE packet we are about to send.
+	 */
+	if ((sc->sc_flags & SCF_ECN_PERMIT) && tp &&
+	    SEQ_GEQ(tp->snd_nxt, tp->snd_max)) {
+		th->th_flags |= TH_ECE;
+		TCP_STATINC(TCP_STAT_ECN_SHS);
+
+		/*
+		 * draft-ietf-tcpm-ecnsyn-00.txt
+		 *
+		 * "[...] a TCP node MAY respond to an ECN-setup
+		 * SYN packet by setting ECT in the responding
+		 * ECN-setup SYN/ACK packet, indicating to routers 
+		 * that the SYN/ACK packet is ECN-Capable.
+		 * This allows a congested router along the path
+		 * to mark the packet instead of dropping the
+		 * packet as an indication of congestion."
+		 *
+		 * "[...] There can be a great benefit in setting
+		 * an ECN-capable codepoint in SYN/ACK packets [...]
+		 * Congestion is  most likely to occur in
+		 * the server-to-client direction.  As a result,
+		 * setting an ECN-capable codepoint in SYN/ACK
+		 * packets can reduce the occurence of three-second
+		 * retransmit timeouts resulting from the drop
+		 * of SYN/ACK packets."
+		 *
+		 * Page 4 and 6, January 2006.
+		 */
+
+		switch (sc->sc_src.sa.sa_family) {
+#ifdef INET
+		case AF_INET:
+			ip->ip_tos |= IPTOS_ECN_ECT0;
+			break;
+#endif
+#ifdef INET6
+		case AF_INET6:
+			ip6->ip6_flow |= htonl(IPTOS_ECN_ECT0 << 20);
+			break;
+#endif
+		}
+		TCP_STATINC(TCP_STAT_ECN_ECT);
+	}
 
 #ifdef TCP_SIGNATURE
-	if (tb.t_flags & TF_SIGNATURE)
-		sc->sc_flags |= SCF_SIGNATURE;
+	if (sc->sc_flags & SCF_SIGNATURE) {
+		struct secasvar *sav;
+		u_int8_t *sigp;
+
+		sav = tcp_signature_getsav(m, th);
+
+		if (sav == NULL) {
+			if (m)
+				m_freem(m);
+			return (EPERM);
+		}
+
+		*optp++ = TCPOPT_SIGNATURE;
+		*optp++ = TCPOLEN_SIGNATURE;
+		sigp = optp;
+		memset(optp, 0, TCP_SIGLEN);
+		optp += TCP_SIGLEN;
+		*optp++ = TCPOPT_NOP;
+		*optp++ = TCPOPT_EOL;
+
+		(void)tcp_signature(m, th, hlen, sav, sigp);
+
+		key_sa_recordxfer(sav, m);
+#ifdef FAST_IPSEC
+		KEY_FREESAV(&sav);
+#else
+		key_freesav(sav);
 #endif
-	sc->sc_tp = tp;
-	if (syn_cache_respond(sc, m) == 0) {
-		uint64_t *tcps = TCP_STAT_GETREF();
-		tcps[TCP_STAT_SNDACKS]++;
-		tcps[TCP_STAT_SNDTOTAL]++;
-		TCP_STAT_PUTREF();
-		syn_cache_insert(sc, tp);
-	} else {
-		s = splsoftnet();
-		/*
-		 * syn_cache_put() will try to schedule the timer, so
-		 * we need to initialize it
-		 */
-		SYN_CACHE_TIMER_ARM(sc);
-		syn_cache_put(sc);
-		splx(s);
-		TCP_STATINC(TCP_STAT_SC_DROPPED);
 	}
+#endif
+
+	/* Compute the packet's checksum. */
+	switch (sc->sc_src.sa.sa_family) {
+	case AF_INET:
+		ip->ip_len = htons(tlen - hlen);
+		th->th_sum = 0;
+		th->th_sum = in4_cksum(m, IPPROTO_TCP, hlen, tlen - hlen);
+		break;
+#ifdef INET6
+	case AF_INET6:
+		ip6->ip6_plen = htons(tlen - hlen);
+		th->th_sum = 0;
+		th->th_sum = in6_cksum(m, IPPROTO_TCP, hlen, tlen - hlen);
+		break;
+#endif
+	}
+
+	/*
+	 * Fill in some straggling IP bits.  Note the stack expects
+	 * ip_len to be in host order, for convenience.
+	 */
+	switch (sc->sc_src.sa.sa_family) {
+#ifdef INET
+	case AF_INET:
+		ip->ip_len = htons(tlen);
+		ip->ip_ttl = ip_defttl;
+		/* XXX tos? */
+		break;
+#endif
+#ifdef INET6
+	case AF_INET6:
+		ip6->ip6_vfc &= ~IPV6_VERSION_MASK;
+		ip6->ip6_vfc |= IPV6_VERSION;
+		ip6->ip6_plen = htons(tlen - hlen);
+		/* ip6_hlim will be initialized afterwards */
+		/* XXX flowlabel? */
+		break;
+#endif
+	}
+
+	/* XXX use IPsec policy on listening socket, on SYN ACK */
+	tp = sc->sc_tp;
+
+	switch (sc->sc_src.sa.sa_family) {
+#ifdef INET
+	case AF_INET:
+		error = ip_output(m, sc->sc_ipopts, ro,
+		    (ip_mtudisc ? IP_MTUDISC : 0),
+		    (struct ip_moptions *)NULL, so);
+		break;
+#endif
+#ifdef INET6
+	case AF_INET6:
+		ip6->ip6_hlim = in6_selecthlim(NULL,
+				(rt = rtcache_validate(ro)) != NULL ? rt->rt_ifp
+				                                    : NULL);
+
+		error = ip6_output(m, NULL /*XXX*/, ro, 0, NULL, so, NULL);
+		break;
+#endif
+	default:
+		error = EAFNOSUPPORT;
+		break;
+	}
+	return (error);
+
+
 	return (1);
 }
 
