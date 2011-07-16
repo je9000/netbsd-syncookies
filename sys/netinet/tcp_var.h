@@ -1001,8 +1001,10 @@ struct socket *syn_cache_promote(struct sockaddr *, struct sockaddr *,
 		struct socket *so, struct mbuf *, struct syn_cache *);
 struct socket *syn_cookie_validate(struct sockaddr *, struct sockaddr *,
 		struct tcphdr *, unsigned int, unsigned int,
-		struct socket *so, struct mbuf *);
-tcp_seq syn_cookie_seq(struct sockaddr *, struct sockaddr *);
+		struct socket *so, struct mbuf *, u_char *, int,
+		struct tcp_opt_info *);
+void syn_cookie_gen_seq(struct sockaddr *, struct sockaddr *, struct tcphdr *);
+u_int16_t syn_cookie_check_seq(struct sockaddr *, struct sockaddr *, struct tcphdr *);
 void	 syn_cache_init(void);
 void	 syn_cache_insert(struct syn_cache *, struct tcpcb *);
 struct syn_cache *syn_cache_lookup(const struct sockaddr *, const struct sockaddr *,

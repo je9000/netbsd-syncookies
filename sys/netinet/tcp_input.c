@@ -1683,7 +1683,7 @@ findpcb:
 						th, toff, tlen, so, m);
 					if (so == NULL)
 						so = syn_cookie_validate(&src.sa, &dst.sa,
-	                        th, toff, tlen, so, m);
+	                        th, toff, tlen, so, m, optp, optlen, &opti);
 					if (so == NULL) {
 						/*
 						 * We don't have a SYN for
@@ -4920,17 +4920,6 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 		ipopts = NULL;
 	}
 
-	/*
-	 * Things we conditionally need to reply with:
-	 * - ECN stuff (if the other end sent it?)
-
-	 * Don't forget to inc tcp stat counters.
-		uint64_t *tcps = TCP_STAT_GETREF();
-		tcps[TCP_STAT_SNDACKS]++;
-		tcps[TCP_STAT_SNDTOTAL]++;
-		TCP_STAT_PUTREF();
-	 */
-
 #ifdef TCP_SIGNATURE
 	if (ioptp || (tp->t_flags & TF_SIGNATURE))
 #else
@@ -5048,7 +5037,7 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 		th = NULL;
 	}
 
-	th->th_seq = syn_cookie_seq(src, dst);
+	syn_cookie_gen_seq(src, dst, th);
 
 	th->th_ack = htonl(ith->th_seq + 1);
 	th->th_off = (sizeof(struct tcphdr) + optlen) >> 2;
@@ -5083,6 +5072,15 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 		    TCPOPT_WINDOW << 16 | TCPOLEN_WINDOW << 8 |
 		    our_request_r_scale);
 		optp += 4;
+	}
+
+	/* Fix up the scaling factor here. If the didn't request
+	 * one, set the appropriate flag in the tcpcb (which we
+	 * then put in the outgoing timestamp header). 15 is the
+	 * flag for "no window scaling was requested".
+	 */
+	if (!(tb.t_flags & TF_RCVD_SCALE)) {
+		tb.requested_s_scale = 15;
 	}
 
 	/* Store stuff here! This is just a test. maxseg is
@@ -5283,23 +5281,209 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 		error = EAFNOSUPPORT;
 		break;
 	}
+
+	/* No errors! */
+	if (error == 0) {
+		uint64_t *tcps = TCP_STAT_GETREF();
+		tcps[TCP_STAT_SNDACKS]++;
+		tcps[TCP_STAT_SNDTOTAL]++;
+		TCP_STAT_PUTREF();
+	}
+
 	return (error);
 }
 
+/* syn_cache_get, our stateful cousin, doesn't take or modify the
+ * oi parameter. It doesn't look like the caller will mind (as
+ * tcp_input will re-process the header options), but if a
+ * problem arises we might want to keep this in mind.
+ */
 struct socket *
 syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
     struct tcphdr *th, unsigned int hlen, unsigned int tlen,
-    struct socket *so, struct mbuf *m)
+    struct socket *so, struct mbuf *m, u_char *optp,
+	int optlen, struct tcp_opt_info *oi)
 {
-	// Validate the seq# is something we generated.
-	// Create a new sc so promote can turn that into a real syn table entry
-	//return syn_cookie_promote();
-	return NULL;
+	struct syn_cache *sc;
+	struct tcpcb tb, *tp;
+	struct mbuf *ipopts;
+	struct tcp_opt_info opti;
+	u_int16_t recovered_mss;
+	/* 15 is the flag for "no scaling". Probably should be a
+	 * named constant of some sort. XXX --je
+	 */
+	u_int16_t recovered_requested_s_scale = 15;
+	long ourwin;
+	int s;
+
+	/* The return value will be 0 if we could not recover the
+	 * original mss (meaning we couldn't decode the ISN,
+	 * meaning the cookie is invalid.
+	 */
+	if ((recovered_mss = syn_cookie_check_seq(src, dst, th)) == 0)
+		return NULL;
+
+	tp = sototcpcb(so);
+
+	memset(&opti, 0, sizeof(opti));
+
+	switch (src->sa_family) {
+#ifdef INET
+	case AF_INET:
+		/*
+		 * Remember the IP options, if any.
+		 */
+		ipopts = ip_srcroute();
+		break;
+#endif
+	default:
+		ipopts = NULL;
+	}
+
+#ifdef TCP_SIGNATURE
+	if (optp || (tp->t_flags & TF_SIGNATURE))
+#else
+	if (optp)
+#endif
+	{
+		tb.t_flags = tcp_do_rfc1323 ? (TF_REQ_SCALE|TF_REQ_TSTMP) : 0;
+#ifdef TCP_SIGNATURE
+		tb.t_flags |= (tp->t_flags & TF_SIGNATURE);
+#endif
+		tb.t_state = TCPS_LISTEN;
+		if (tcp_dooptions(&tb, optp, optlen, th, m, m->m_pkthdr.len -
+		    sizeof(struct tcphdr) - optlen - hlen, oi) < 0)
+			return (0);
+	} else
+		tb.t_flags = 0;
+
+	s = splsoftnet();
+	sc = pool_get(&syn_cache_pool, PR_NOWAIT);
+	splx(s);
+	if (sc == NULL) {
+		if (ipopts)
+			(void) m_free(ipopts);
+		return (0);
+	}
+
+	/* tcp_dooptions will not set the appropriate flags inside
+	 * the tcpcb unless the timestamp was received along with a
+	 * SYN flag. With a SYN cookie reply that will never happen,
+	 * so lets put the flags in place manually. Note that this
+	 * condition only applies to timestamps; we won't see any
+	 * other header options appear this way (but they may appear
+	 * as flags set inside the timestamp header sent by us!).
+	 */
+	if (oi->ts_present) {
+		tb.t_flags |= TF_RCVD_TSTMP;
+		tb.ts_recent = oi->ts_val;
+		tb.ts_recent_age = tcp_now;
+		recovered_mss = oi->ts_ecr >> 16;
+		recovered_requested_s_scale = oi->ts_ecr & 0xFF;
+	}
+
+	/*
+	 * Fill in the cache, and put the necessary IP and TCP
+	 * options into the reply.
+	 */
+	memset(sc, 0, sizeof(struct syn_cache));
+	callout_init(&sc->sc_timer, CALLOUT_MPSAFE);
+	bcopy(src, &sc->sc_src, src->sa_len);
+	bcopy(dst, &sc->sc_dst, dst->sa_len);
+	sc->sc_flags = 0;
+	sc->sc_ipopts = ipopts;
+	sc->sc_irs = th->th_seq;
+	sc->sc_iss = th->th_ack;
+	sc->sc_peermaxseg = recovered_mss;
+
+	/* Assume the mss we sent in the syn+ack is the same as we
+	 * generate here. Not necessarily true every time, so we could
+	 * store the sent mss in the outgoing timestamp header if this
+	 * causes problems. --je
+	 */
+	sc->sc_ourmaxseg = tcp_mss_to_advertise(m->m_flags & M_PKTHDR ?
+						m->m_pkthdr.rcvif : NULL,
+						src->sa_family);
+
+	ourwin = sbspace(&so->so_rcv);
+	if (ourwin > TCP_MAXWIN)
+		ourwin = TCP_MAXWIN;
+	sc->sc_win = ourwin;
+	sc->sc_timebase = tcp_now - 1;	/* see tcp_newtcpcb() */
+	sc->sc_timestamp = tb.ts_recent;
+	if ((tb.t_flags & (TF_REQ_TSTMP|TF_RCVD_TSTMP)) ==
+	    (TF_REQ_TSTMP|TF_RCVD_TSTMP))
+		sc->sc_flags |= SCF_TIMESTAMP;
+
+	/* If we were able to recover the requested window scaling
+	 * factor then set the appropriate flags in the tcpcb.
+	 */
+	if (recovered_requested_s_scale < 15) {
+		tb.t_flags = (TF_RCVD_SCALE|TF_REQ_SCALE);
+		sc->sc_requested_s_scale = recovered_requested_s_scale;
+		sc->sc_request_r_scale = 0;
+		/*
+		 * Pick the smallest possible scaling factor that
+		 * will still allow us to scale up to sb_max.
+		 *
+		 * We do this because there are broken firewalls that
+		 * will corrupt the window scale option, leading to
+		 * the other endpoint believing that our advertised
+		 * window is unscaled.  At scale factors larger than
+		 * 5 the unscaled window will drop below 1500 bytes,
+		 * leading to serious problems when traversing these
+		 * broken firewalls.
+		 *
+		 * With the default sbmax of 256K, a scale factor
+		 * of 3 will be chosen by this algorithm.  Those who
+		 * choose a larger sbmax should watch out
+		 * for the compatiblity problems mentioned above.
+		 *
+		 * RFC1323: The Window field in a SYN (i.e., a <SYN>
+		 * or <SYN,ACK>) segment itself is never scaled.
+		 */
+		while (sc->sc_request_r_scale < TCP_MAX_WINSHIFT &&
+		    (TCP_MAXWIN << sc->sc_request_r_scale) < sb_max)
+			sc->sc_request_r_scale++;
+	} else {
+		sc->sc_requested_s_scale = 15;
+		sc->sc_request_r_scale = 15;
+	}
+
+	/* Either this has to be a flag in the timestamp option or
+	 * we will have to add code to set this flag in the tcpcb?
+	 * the first time we get a SACK option. In the mean time we
+	 * don't support SACK and SYN cookies. TODO --je
+	if ((tb.t_flags & TF_SACK_PERMIT) && tcp_do_sack)
+		sc->sc_flags |= SCF_SACK_PERMIT;
+	 */
+
+	/*
+	 * ECN setup packet recieved.
+	 */
+	/* Same deal as SACK above. --je
+	if ((th->th_flags & (TH_ECE|TH_CWR)) && tcp_do_ecn)
+		sc->sc_flags |= SCF_ECN_PERMIT;
+	 */
+
+#ifdef TCP_SIGNATURE
+	if (tb.t_flags & TF_SIGNATURE)
+		sc->sc_flags |= SCF_SIGNATURE;
+#endif
+	sc->sc_tp = tp;
+
+	return syn_cache_promote(src, dst, th, hlen, tlen, so, m, sc);
 }
 
-tcp_seq
-syn_cookie_seq(struct sockaddr *src, struct sockaddr *dst)
+void
+syn_cookie_gen_seq(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th)
+{
+	th->th_seq = 1;
+	return;
+}
+
+u_int16_t
+syn_cookie_check_seq(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th)
 {
 	return 1;
 }
-
