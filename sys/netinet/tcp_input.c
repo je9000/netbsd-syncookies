@@ -255,6 +255,31 @@ static struct timeval tcp_rst_ppslim_last;
 static int tcp_ackdrop_ppslim_count = 0;
 static struct timeval tcp_ackdrop_ppslim_last;
 
+static struct {
+	u_int32_t refresh_time;
+	u_int32_t idx;
+	u_int32_t *secret[2];
+	u_int32_t *unused_secret;
+	u_int32_t secret_data[3];
+} syn_cookie_secrets;
+
+/* MSS table inspired by FreeBSD. Used with SYN cookies sent to
+ * peers who do not support timestamps. In these cases, the only
+ * supported MSS values are the ones listed in this table. The
+ * largest MSS that does not exceed the client's requested MSS
+ * is chosen. Data should be gathered to determine the optimal
+ * set of values (ie, which 8 values are most popular while also
+ * adaquately covering narrow networks). As far as I can tell,
+ * the minimum MSS should be 536 (per RFC 791), but other
+ * operating systems support less than that. The minimum fragment
+ * size is 68 bytes (including IP header), and the maximum IP
+ * header size is 60 bytes, so the minimum I think we need to
+ * support is an 8 byte MSS. That's still unreasonably small, but
+ * it's conceivable one could derive that as a possible MSS from a
+ * (twisted) reading of the RFC.
+ */
+static u_int16_t tcp_sc_msstab[] = { 8, 256, 468, 536, 996, 1452, 1460, 8960 };
+
 #define TCP_PAWS_IDLE	(24U * 24 * 60 * 60 * PR_SLOWHZ)
 
 /* for modulo comparisons of timestamps */
@@ -3710,6 +3735,17 @@ syn_cache_init(void)
 	/* Initialize the hash buckets. */
 	for (i = 0; i < tcp_syn_cache_size; i++)
 		TAILQ_INIT(&tcp_syn_cache[i].sch_bucket);
+
+	/* Piggy-back on the syn cache initialization and initialize
+	 * the syn cookie secrets. tcp_now must be initialized before
+	 * syn_cache_init is called. */
+	syn_cookie_secrets.refresh_time = tcp_now;
+	syn_cookie_secrets.secret_data[0] = arc4random();
+	/* secret_data[1] will be initialized before it is used. */
+	syn_cookie_secrets.idx = 0;
+	syn_cookie_secrets.secret[0] = &syn_cookie_secrets.secret_data[0];
+	syn_cookie_secrets.secret[1] = &syn_cookie_secrets.secret_data[1];
+	syn_cookie_secrets.unused_secret = &syn_cookie_secrets.secret_data[2];
 }
 
 void
@@ -3960,6 +3996,7 @@ syn_cache_get(struct sockaddr *src, struct sockaddr *dst,
 	struct syn_cache *sc;
 	struct syn_cache_head *scp;
 	int s;
+	struct socket *retval;
 
 	s = splsoftnet();
 	if ((sc = syn_cache_lookup(src, dst, &scp)) == NULL) {
@@ -3982,7 +4019,11 @@ syn_cache_get(struct sockaddr *src, struct sockaddr *dst,
 	/* Remove this cache entry */
 	syn_cache_rm(sc);
 	splx(s);
-	return syn_cache_promote(src, dst, th, hlen, tlen, so, m, sc);
+	retval = syn_cache_promote(src, dst, th, hlen, tlen, so, m, sc);
+	s = splsoftnet();
+	syn_cache_put(sc);
+	splx(s);
+	return retval;
 }
 
 struct socket *
@@ -3996,7 +4037,6 @@ syn_cache_promote(struct sockaddr *src, struct sockaddr *dst,
 #endif
 	struct tcpcb *tp = 0;
 	struct mbuf *am;
-	int s;
 	struct socket *oso;
 
 	/*
@@ -4250,9 +4290,6 @@ syn_cache_promote(struct sockaddr *src, struct sockaddr *dst,
 	tp->t_dupacks = 0;
 
 	TCP_STATINC(TCP_STAT_SC_COMPLETED);
-	s = splsoftnet();
-	syn_cache_put(sc);
-	splx(s);
 	return (so);
 
 resetandabort:
@@ -4263,9 +4300,6 @@ abort:
 		(void) soabort(so);
 		mutex_enter(softnet_lock);
 	}
-	s = splsoftnet();
-	syn_cache_put(sc);
-	splx(s);
 	TCP_STATINC(TCP_STAT_SC_ABORTED);
 	return ((struct socket *)(-1));
 }
@@ -5004,7 +5038,7 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	memset(mtod(m, u_char *), 0, tlen);
 
 	switch (src->sa_family) {
-/* Should this get an #ifdef INET ? --je */
+	/* Should this get an #ifdef INET ? --je */
 	case AF_INET:
 		ip = mtod(m, struct ip *);
 		ip->ip_v = 4;
@@ -5037,7 +5071,14 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 		th = NULL;
 	}
 
-	syn_cookie_gen_seq(src, dst, th);
+	/* I don't know if this is the best place to do this, but
+	 * we should reject clients who ask for an MSS we can't
+	 * service (or doesn't make sense!).
+	 */
+	if (ioi->maxseg < tcp_sc_msstab[0]) {
+		return 0;
+	}
+	syn_cookie_gen_seq(src, dst, th, ioi->maxseg);
 
 	th->th_ack = htonl(ith->th_seq + 1);
 	th->th_off = (sizeof(struct tcphdr) + optlen) >> 2;
@@ -5300,11 +5341,11 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
  */
 struct socket *
 syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
-    struct tcphdr *th, unsigned int hlen, unsigned int tlen,
-    struct socket *so, struct mbuf *m, u_char *optp,
+	struct tcphdr *th, unsigned int hlen, unsigned int tlen,
+	struct socket *so, struct mbuf *m, u_char *optp,
 	int optlen, struct tcp_opt_info *oi)
 {
-	struct syn_cache *sc;
+	struct syn_cache sc;
 	struct tcpcb tb, *tp;
 	struct mbuf *ipopts;
 	struct tcp_opt_info opti;
@@ -5314,7 +5355,7 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	 */
 	u_int16_t recovered_requested_s_scale = 15;
 	long ourwin;
-	int s;
+	struct socket *retval;
 
 	/* The return value will be 0 if we could not recover the
 	 * original mss (meaning we couldn't decode the ISN,
@@ -5357,15 +5398,6 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	} else
 		tb.t_flags = 0;
 
-	s = splsoftnet();
-	sc = pool_get(&syn_cache_pool, PR_NOWAIT);
-	splx(s);
-	if (sc == NULL) {
-		if (ipopts)
-			(void) m_free(ipopts);
-		return (0);
-	}
-
 	/* tcp_dooptions will not set the appropriate flags inside
 	 * the tcpcb unless the timestamp was received along with a
 	 * SYN flag. With a SYN cookie reply that will never happen,
@@ -5386,42 +5418,42 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	 * Fill in the cache, and put the necessary IP and TCP
 	 * options into the reply.
 	 */
-	memset(sc, 0, sizeof(struct syn_cache));
-	callout_init(&sc->sc_timer, CALLOUT_MPSAFE);
-	bcopy(src, &sc->sc_src, src->sa_len);
-	bcopy(dst, &sc->sc_dst, dst->sa_len);
-	sc->sc_flags = 0;
-	sc->sc_ipopts = ipopts;
-	sc->sc_irs = th->th_seq;
-	sc->sc_iss = th->th_ack;
-	sc->sc_peermaxseg = recovered_mss;
+	memset(&sc, 0, sizeof(struct syn_cache));
+	callout_init(&sc.sc_timer, CALLOUT_MPSAFE);
+	bcopy(src, &sc.sc_src, src->sa_len);
+	bcopy(dst, &sc.sc_dst, dst->sa_len);
+	sc.sc_flags = 0;
+	sc.sc_ipopts = ipopts;
+	sc.sc_irs = th->th_seq;
+	sc.sc_iss = th->th_ack;
+	sc.sc_peermaxseg = recovered_mss;
 
 	/* Assume the mss we sent in the syn+ack is the same as we
 	 * generate here. Not necessarily true every time, so we could
 	 * store the sent mss in the outgoing timestamp header if this
 	 * causes problems. --je
 	 */
-	sc->sc_ourmaxseg = tcp_mss_to_advertise(m->m_flags & M_PKTHDR ?
+	sc.sc_ourmaxseg = tcp_mss_to_advertise(m->m_flags & M_PKTHDR ?
 						m->m_pkthdr.rcvif : NULL,
 						src->sa_family);
 
 	ourwin = sbspace(&so->so_rcv);
 	if (ourwin > TCP_MAXWIN)
 		ourwin = TCP_MAXWIN;
-	sc->sc_win = ourwin;
-	sc->sc_timebase = tcp_now - 1;	/* see tcp_newtcpcb() */
-	sc->sc_timestamp = tb.ts_recent;
+	sc.sc_win = ourwin;
+	sc.sc_timebase = tcp_now - 1;	/* see tcp_newtcpcb() */
+	sc.sc_timestamp = tb.ts_recent;
 	if ((tb.t_flags & (TF_REQ_TSTMP|TF_RCVD_TSTMP)) ==
 	    (TF_REQ_TSTMP|TF_RCVD_TSTMP))
-		sc->sc_flags |= SCF_TIMESTAMP;
+		sc.sc_flags |= SCF_TIMESTAMP;
 
 	/* If we were able to recover the requested window scaling
 	 * factor then set the appropriate flags in the tcpcb.
 	 */
 	if (recovered_requested_s_scale < 15) {
 		tb.t_flags = (TF_RCVD_SCALE|TF_REQ_SCALE);
-		sc->sc_requested_s_scale = recovered_requested_s_scale;
-		sc->sc_request_r_scale = 0;
+		sc.sc_requested_s_scale = recovered_requested_s_scale;
+		sc.sc_request_r_scale = 0;
 		/*
 		 * Pick the smallest possible scaling factor that
 		 * will still allow us to scale up to sb_max.
@@ -5442,12 +5474,12 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 		 * RFC1323: The Window field in a SYN (i.e., a <SYN>
 		 * or <SYN,ACK>) segment itself is never scaled.
 		 */
-		while (sc->sc_request_r_scale < TCP_MAX_WINSHIFT &&
-		    (TCP_MAXWIN << sc->sc_request_r_scale) < sb_max)
-			sc->sc_request_r_scale++;
+		while (sc.sc_request_r_scale < TCP_MAX_WINSHIFT &&
+		    (TCP_MAXWIN << sc.sc_request_r_scale) < sb_max)
+			sc.sc_request_r_scale++;
 	} else {
-		sc->sc_requested_s_scale = 15;
-		sc->sc_request_r_scale = 15;
+		sc.sc_requested_s_scale = 15;
+		sc.sc_request_r_scale = 15;
 	}
 
 	/* Either this has to be a flag in the timestamp option or
@@ -5455,7 +5487,7 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	 * the first time we get a SACK option. In the mean time we
 	 * don't support SACK and SYN cookies. TODO --je
 	if ((tb.t_flags & TF_SACK_PERMIT) && tcp_do_sack)
-		sc->sc_flags |= SCF_SACK_PERMIT;
+		sc.sc_flags |= SCF_SACK_PERMIT;
 	 */
 
 	/*
@@ -5463,27 +5495,98 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	 */
 	/* Same deal as SACK above. --je
 	if ((th->th_flags & (TH_ECE|TH_CWR)) && tcp_do_ecn)
-		sc->sc_flags |= SCF_ECN_PERMIT;
+		sc.sc_flags |= SCF_ECN_PERMIT;
 	 */
 
 #ifdef TCP_SIGNATURE
 	if (tb.t_flags & TF_SIGNATURE)
-		sc->sc_flags |= SCF_SIGNATURE;
+		sc.sc_flags |= SCF_SIGNATURE;
 #endif
-	sc->sc_tp = tp;
+	sc.sc_tp = tp;
 
-	return syn_cache_promote(src, dst, th, hlen, tlen, so, m, sc);
+	retval = syn_cache_promote(src, dst, th, hlen, tlen, so, m, &sc);
+	if (sc.sc_ipopts)
+		(void) m_free(sc.sc_ipopts);
+	return retval;
 }
 
+/* It appears the atomic_ops implement both acquire and release
+ * semantics, so I shouldn't need to do anything special when
+ * reading a variable modified with one of the atomic_ops. But I
+ * could be wrong.
+ */
 void
-syn_cookie_gen_seq(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th)
+syn_cookie_gen_seq(struct sockaddr *src, struct sockaddr *dst,
+	struct tcphdr *th, u_int16_t mss)
 {
-	th->th_seq = 1;
+	u_int8_t msstab_entry;
+	u_int32_t secret_idx, secret, new_seq;
+
+	for (msstab_entry = 0; msstab_entry < 7; msstab_entry++) {
+		if (mss < tcp_sc_msstab[msstab_entry + 1])
+			break;
+	}
+
+	syn_cookie_regenerate_secrets();
+	secret_idx = syn_cookie_secrets.idx;
+	secret = *syn_cookie_secrets.secret[secret_idx];
+	new_seq = secret;
+
+	switch (src->sa_family) {
+#ifdef INET
+	case AF_INET:
+		new_seq ^= ((struct sockaddr_in *) src)->sin_addr.s_addr;
+		new_seq += ((struct sockaddr_in *) dst)->sin_addr.s_addr;
+		new_seq ^= ((((struct sockaddr_in *) src)->sin_port << 16 )
+				& ((struct sockaddr_in *) src)->sin_port);
+		break;
+#endif
+#ifdef INET6
+	case AF_INET6:
+		new_seq ^= ((struct sockaddr_in6 *) src)->sin6_addr.__u6_addr.__u6_addr32[3];
+		new_seq += ((struct sockaddr_in6 *) dst)->sin6_addr.__u6_addr.__u6_addr32[3];
+		new_seq ^= ((((struct sockaddr_in6 *) src)->sin6_port << 16 )
+				& ((struct sockaddr_in6 *) src)->sin6_port);
+		break;
+#endif
+	default:
+		/* How could we possibly get here? Someone implemented
+		 * TCP over a layer 3 protocol other than IPv4 or v6 and
+		 * didn't implement syn cookie code.
+		 */ 
+		;
+	}
+	secret += new_seq;
+	new_seq = ( new_seq & 0xFFFFFFF0 )
+			| (msstab_entry << 1)
+			| (syn_cookie_secrets.idx);
+
+	th->th_seq = new_seq;
 	return;
 }
 
 u_int16_t
 syn_cookie_check_seq(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th)
 {
-	return 1;
+	return tcp_sc_msstab[1];
+}
+
+/* This could be called every tick instead of on every cookie
+ * generated (or some combination of the two).
+ */
+void
+syn_cookie_regenerate_secrets(void)
+{
+	int s;
+
+	s = splsoftnet();
+	if (tcp_now > syn_cookie_secrets.refresh_time + (tcp_keepinit / 2)) {
+		u_int32_t next_idx = syn_cookie_secrets.idx ? 0 : 1;
+		*syn_cookie_secrets.unused_secret = arc4random();
+		atomic_swap_ptr( &syn_cookie_secrets.secret[next_idx],
+			syn_cookie_secrets.unused_secret);
+		atomic_swap_32( &syn_cookie_secrets.idx, next_idx );
+		atomic_swap_32( &syn_cookie_secrets.refresh_time, tcp_now );
+	}
+	splx(s);
 }

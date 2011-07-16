@@ -534,6 +534,11 @@ struct syn_cache_head {
 	u_short sch_length;			/* # entries in bucket */
 };
 
+struct syn_cookie_secret {
+	u_int32_t refresh_time;
+	u_int32_t secret;
+};
+
 #define	intotcpcb(ip)	((struct tcpcb *)(ip)->inp_ppcb)
 #ifdef INET6
 #define	in6totcpcb(ip)	((struct tcpcb *)(ip)->in6p_ppcb)
@@ -1003,8 +1008,9 @@ struct socket *syn_cookie_validate(struct sockaddr *, struct sockaddr *,
 		struct tcphdr *, unsigned int, unsigned int,
 		struct socket *so, struct mbuf *, u_char *, int,
 		struct tcp_opt_info *);
-void syn_cookie_gen_seq(struct sockaddr *, struct sockaddr *, struct tcphdr *);
+void syn_cookie_gen_seq(struct sockaddr *, struct sockaddr *, struct tcphdr *, u_int16_t);
 u_int16_t syn_cookie_check_seq(struct sockaddr *, struct sockaddr *, struct tcphdr *);
+void syn_cookie_regenerate_secrets(void);
 void	 syn_cache_init(void);
 void	 syn_cache_insert(struct syn_cache *, struct tcpcb *);
 struct syn_cache *syn_cache_lookup(const struct sockaddr *, const struct sockaddr *,
