@@ -261,6 +261,7 @@ static struct {
 	u_int32_t *secret[2];
 	u_int32_t *unused_secret;
 	u_int32_t secret_data[3];
+	kmutex_t  updating_lock;
 } syn_cookie_secrets;
 
 /* MSS table inspired by FreeBSD. Used with SYN cookies sent to
@@ -3746,6 +3747,7 @@ syn_cache_init(void)
 	syn_cookie_secrets.secret[0] = &syn_cookie_secrets.secret_data[0];
 	syn_cookie_secrets.secret[1] = &syn_cookie_secrets.secret_data[1];
 	syn_cookie_secrets.unused_secret = &syn_cookie_secrets.secret_data[2];
+	mutex_init( &syn_cookie_secrets.updating_lock, MUTEX_DEFAULT, IPL_SOFTNET );
 }
 
 void
@@ -5580,9 +5582,8 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 void
 syn_cookie_regenerate_secrets(void)
 {
-	int s;
 	if (tcp_now > syn_cookie_secrets.refresh_time + (tcp_keepinit / 2)) {
-		s = splsoftnet();
+		mutex_enter(&syn_cookie_secrets.updating_lock);
 		if (tcp_now > ((volatile u_int32_t)syn_cookie_secrets.refresh_time) + (tcp_keepinit / 2)) {
 			u_int32_t next_idx = syn_cookie_secrets.idx ? 0 : 1;
 			*syn_cookie_secrets.unused_secret = arc4random();
@@ -5591,7 +5592,7 @@ syn_cookie_regenerate_secrets(void)
 			atomic_swap_32( &syn_cookie_secrets.idx, next_idx );
 			atomic_swap_32( &syn_cookie_secrets.refresh_time, tcp_now );
 		}
-		splx(s);
+		mutex_exit(&syn_cookie_secrets.updating_lock);
 	}
 }
 
