@@ -4894,10 +4894,60 @@ syn_cache_respond(struct syn_cache *sc, struct mbuf *m)
 }
 
 
-/* TCP SYN COKIES BELOW!!!!!!!!
-
-vvvvvvvvvvvvvvvvvvvvv
-*/
+/* TCP SYN cookie implementation, copyright John Eaglesham 2011
+ * Blah blah BSD license but it's cool if you buy me a beer too.
+ *
+ * SYN cookies are implemented along side the SYN cache. Inside
+ * the SYN+ACK initial sequence number we place 3 items:
+ *
+ *  0                   1                   2                   3   
+ *  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 
+ * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ * |i| MSS |    hash(src ip, src port, dst ip, dst port, secret)   |
+ * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *
+ * The bottom bit is an index into a table of possible secrets.
+ * The index is swapped every net.inet.tcp.keepinit/2 hz and the
+ * older secret is then changed. This means clients have
+ * net.inet.tcp.keepinit hz (default 75 seconds) to respond before
+ * the secret used in their cookie becomes invalid.
+ *
+ * The next three bits represent an index into a fixed table of
+ * possible MSS values. The largest entry in this table is chosen
+ * that does not exceed the MSS sent by the client.
+ *
+ * The remaining 28 bits consist of a "cookie" which allows us to
+ * validate this packet was set by us. The implementation of this
+ * cookie is subject to change, see the documented functions below.
+ *
+ * When possible we will encode further information into the TCP
+ * timestamp field.
+ *
+ *  0                   1                   2                   3   
+ *  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 
+ * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ * | R Scale |E|S|T|    Unused     |       Original client MSS     |
+ * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *
+ * The bottom 4 bits are the bottom 4 bits of the client's
+ * requested window scaling factor (4 bits are enough to cover all
+ * valid values).
+ *
+ * Bit 5 specifies whether client is ECN capable.
+ *
+ * Bit 6 specifies whether client is SACK capable.
+ *
+ * Bit 7 specifies whether client has requested TCP timestamps.
+ *
+ * Bits 8 through 15 are unsused (though may hold the TCP signature
+ * flag in the future).
+ *
+ * This data can be used to reproduce the original client request
+ * almost exactly and will (supersede the MSS recovered from the
+ * ISN). Currently, this header is only sent when the client asks
+ * for TCP timestamps, though I believe we can send it whenever a
+ * client sends any RFC 1323 option. This is a TODO.
+ */
 
 /* Some parameters here are prefixed with an "i" unlike
  * similar above functions (which use standardized names).
@@ -4982,7 +5032,7 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	 * the syncache entry could have gotten routing
 	 * information before syn_cache_reply is called, so we
 	 * will proceed without any cached route information for
-	 * now. -- je 20110716
+	 * now. -- je
 	 */
 	ro = NULL;
 	switch (src->sa_family) {
@@ -5078,7 +5128,7 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	if (ioi->maxseg < tcp_sc_msstab[0]) {
 		return 0;
 	}
-	syn_cookie_gen_seq(src, dst, th, ioi->maxseg);
+	syn_cookie_generate_seq(src, dst, th, ioi->maxseg);
 
 	th->th_ack = htonl(ith->th_seq + 1);
 	th->th_off = (sizeof(struct tcphdr) + optlen) >> 2;
@@ -5136,14 +5186,22 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	 *
 	 * Maybe we should violate the RFC and send a ts
 	 * regardless, since it's so useful to us. Does that
-	 * actually violate the RFC? I'm not completely sure...
-	 * --je
+	 * actually violate the RFC? I'm not completely sure.
+	 * Maybe detect if he sent any RFC 1323 option and if so
+	 * assume he will support timestamps? XXX --je
 	 */
 	if (tb.t_flags & (TF_REQ_TSTMP|TF_RCVD_TSTMP)) {
 		u_int32_t *lp = (u_int32_t *)(optp);
 		/* Form timestamp option as shown in appendix A of RFC 1323. */
 		*lp++ = htonl(TCPOPT_TSTAMP_HDR);
-		*lp++ = (ioi->maxseg << 16) | tb.requested_s_scale;
+		/* The offset bits for these flags should be constants.
+		   XXX --je
+		 */
+		*lp++ = (ioi->maxseg << 16)
+			| ((ith->th_flags & (TH_ECE|TH_CWR) ? 1 : 0) << 4)
+			| ((tb.t_flags & TF_SACK_PERMIT ? 1 : 0) << 5)
+			| ((tb.t_flags & (TF_REQ_TSTMP|TF_RCVD_TSTMP) ? 1 : 0) << 6)
+			| (tb.requested_s_scale & 0xF);
 		*lp   = htonl(tb.ts_recent);
 		optp += TCPOLEN_TSTAMP_APPA;
 	}
@@ -5350,12 +5408,15 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	struct mbuf *ipopts;
 	struct tcp_opt_info opti;
 	u_int16_t recovered_mss;
+	long ourwin;
+	struct socket *retval;
 	/* 15 is the flag for "no scaling". Probably should be a
 	 * named constant of some sort. XXX --je
 	 */
 	u_int16_t recovered_requested_s_scale = 15;
-	long ourwin;
-	struct socket *retval;
+	u_int8_t recovered_do_sack = 0;
+	u_int8_t recovered_do_ecn = 0;
+	u_int8_t recovered_do_ts = 0;
 
 	/* The return value will be 0 if we could not recover the
 	 * original mss (meaning we couldn't decode the ISN,
@@ -5407,11 +5468,16 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	 * as flags set inside the timestamp header sent by us!).
 	 */
 	if (oi->ts_present) {
-		tb.t_flags |= TF_RCVD_TSTMP;
-		tb.ts_recent = oi->ts_val;
-		tb.ts_recent_age = tcp_now;
 		recovered_mss = oi->ts_ecr >> 16;
-		recovered_requested_s_scale = oi->ts_ecr & 0xFF;
+		recovered_requested_s_scale = oi->ts_ecr & 0x0F;
+		recovered_do_sack = oi->ts_ecr & 0x10;
+		recovered_do_ecn = oi->ts_ecr & 0x20;
+		recovered_do_ts = oi->ts_ecr & 0x30;
+		if (recovered_do_ts) {
+			tb.t_flags |= TF_RCVD_TSTMP|TF_REQ_TSTMP;
+			tb.ts_recent = oi->ts_val;
+			tb.ts_recent_age = tcp_now;
+		}
 	}
 
 	/*
@@ -5482,21 +5548,14 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 		sc.sc_request_r_scale = 15;
 	}
 
-	/* Either this has to be a flag in the timestamp option or
-	 * we will have to add code to set this flag in the tcpcb?
-	 * the first time we get a SACK option. In the mean time we
-	 * don't support SACK and SYN cookies. TODO --je
-	if ((tb.t_flags & TF_SACK_PERMIT) && tcp_do_sack)
+	if (recovered_do_sack && tcp_do_sack)
 		sc.sc_flags |= SCF_SACK_PERMIT;
-	 */
 
 	/*
 	 * ECN setup packet recieved.
 	 */
-	/* Same deal as SACK above. --je
-	if ((th->th_flags & (TH_ECE|TH_CWR)) && tcp_do_ecn)
+	if (recovered_do_ecn && tcp_do_ecn)
 		sc.sc_flags |= SCF_ECN_PERMIT;
-	 */
 
 #ifdef TCP_SIGNATURE
 	if (tb.t_flags & TF_SIGNATURE)
@@ -5510,42 +5569,61 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	return retval;
 }
 
-/* It appears the atomic_ops implement both acquire and release
+/* This could be called every tick instead of on every cookie
+ * generated (or some combination of the two).
+ *
+ * It appears the atomic_ops implement both acquire and release
  * semantics, so I shouldn't need to do anything special when
  * reading a variable modified with one of the atomic_ops. But I
  * could be wrong.
  */
 void
-syn_cookie_gen_seq(struct sockaddr *src, struct sockaddr *dst,
-	struct tcphdr *th, u_int16_t mss)
+syn_cookie_regenerate_secrets(void)
 {
-	u_int8_t msstab_entry;
-	u_int32_t secret_idx, secret, new_seq;
-
-	for (msstab_entry = 0; msstab_entry < 7; msstab_entry++) {
-		if (mss < tcp_sc_msstab[msstab_entry + 1])
-			break;
+	int s;
+	if (tcp_now > syn_cookie_secrets.refresh_time + (tcp_keepinit / 2)) {
+		s = splsoftnet();
+		if (tcp_now > ((volatile u_int32_t)syn_cookie_secrets.refresh_time) + (tcp_keepinit / 2)) {
+			u_int32_t next_idx = syn_cookie_secrets.idx ? 0 : 1;
+			*syn_cookie_secrets.unused_secret = arc4random();
+			atomic_swap_ptr( &syn_cookie_secrets.secret[next_idx],
+				syn_cookie_secrets.unused_secret);
+			atomic_swap_32( &syn_cookie_secrets.idx, next_idx );
+			atomic_swap_32( &syn_cookie_secrets.refresh_time, tcp_now );
+		}
+		splx(s);
 	}
+}
 
+/* The following are functions to create and validate syn cookies.
+ * The current implementation is very poor, merely a proof-of-
+ * concept. This method uses a simple hash with secret data mixed
+ * in. It expects to be able to re-generate that hash given the
+ * same input data, thus validating the client.
+ */
+
+u_int32_t syn_cookie_hash_secret(struct sockaddr *src,
+	struct sockaddr *dst, u_int32_t secret_idx)
+{
+	u_int32_t retval, secret;
 	syn_cookie_regenerate_secrets();
-	secret_idx = syn_cookie_secrets.idx;
-	secret = *syn_cookie_secrets.secret[secret_idx];
-	new_seq = secret;
+
+	retval = secret = *syn_cookie_secrets.secret[secret_idx];
 
 	switch (src->sa_family) {
 #ifdef INET
 	case AF_INET:
-		new_seq ^= ((struct sockaddr_in *) src)->sin_addr.s_addr;
-		new_seq += ((struct sockaddr_in *) dst)->sin_addr.s_addr;
-		new_seq ^= ((((struct sockaddr_in *) src)->sin_port << 16 )
+		retval ^= ((struct sockaddr_in *) src)->sin_addr.s_addr;
+		retval += ((struct sockaddr_in *) dst)->sin_addr.s_addr;
+		retval ^= ((((struct sockaddr_in *) src)->sin_port << 16 )
 				& ((struct sockaddr_in *) src)->sin_port);
 		break;
 #endif
 #ifdef INET6
 	case AF_INET6:
-		new_seq ^= ((struct sockaddr_in6 *) src)->sin6_addr.__u6_addr.__u6_addr32[3];
-		new_seq += ((struct sockaddr_in6 *) dst)->sin6_addr.__u6_addr.__u6_addr32[3];
-		new_seq ^= ((((struct sockaddr_in6 *) src)->sin6_port << 16 )
+		retval ^= ((struct sockaddr_in6 *) src)->sin6_addr.__u6_addr.__u6_addr32[3];
+		retval += ((struct sockaddr_in6 *) dst)->sin6_addr.__u6_addr.__u6_addr32[3];
+		retval ^= ((((struct sockaddr_in6 *) src)->sin6_port << 16 )
 				& ((struct sockaddr_in6 *) src)->sin6_port);
 		break;
 #endif
@@ -5556,7 +5634,24 @@ syn_cookie_gen_seq(struct sockaddr *src, struct sockaddr *dst,
 		 */ 
 		;
 	}
-	secret += new_seq;
+	retval += secret;
+	return retval;
+}
+
+void
+syn_cookie_generate_seq(struct sockaddr *src, struct sockaddr *dst,
+	struct tcphdr *th, u_int16_t mss)
+{
+	u_int8_t msstab_entry;
+	u_int32_t new_seq;
+
+	for (msstab_entry = 0; msstab_entry < 7; msstab_entry++) {
+		if (mss < tcp_sc_msstab[msstab_entry + 1])
+			break;
+	}
+
+	new_seq = syn_cookie_hash_secret(src, dst, syn_cookie_secrets.idx);
+
 	new_seq = ( new_seq & 0xFFFFFFF0 )
 			| (msstab_entry << 1)
 			| (syn_cookie_secrets.idx);
@@ -5566,27 +5661,22 @@ syn_cookie_gen_seq(struct sockaddr *src, struct sockaddr *dst,
 }
 
 u_int16_t
-syn_cookie_check_seq(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th)
+syn_cookie_check_seq(struct sockaddr *src, struct sockaddr *dst,
+	struct tcphdr *th)
 {
-	return tcp_sc_msstab[1];
+	u_int32_t expected_seq;
+	u_int32_t recovered_isn = th->th_ack - 1;
+	u_int32_t recovered_secret_idx = recovered_isn & 0x1;;
+	u_int8_t recovered_msstab_entry;
+
+	recovered_secret_idx = recovered_isn & 0x1;
+	expected_seq = syn_cookie_hash_secret(src, dst, recovered_secret_idx);
+
+	/* Cookies don't match! Get out of here. */
+	if ((expected_seq & 0xFFFFFFF0) == (recovered_isn & 0xFFFFFFF0))
+		return 0;
+	recovered_msstab_entry = (recovered_isn & 0x0000000E ) >> 1;
+
+	return tcp_sc_msstab[recovered_msstab_entry];
 }
 
-/* This could be called every tick instead of on every cookie
- * generated (or some combination of the two).
- */
-void
-syn_cookie_regenerate_secrets(void)
-{
-	int s;
-
-	s = splsoftnet();
-	if (tcp_now > syn_cookie_secrets.refresh_time + (tcp_keepinit / 2)) {
-		u_int32_t next_idx = syn_cookie_secrets.idx ? 0 : 1;
-		*syn_cookie_secrets.unused_secret = arc4random();
-		atomic_swap_ptr( &syn_cookie_secrets.secret[next_idx],
-			syn_cookie_secrets.unused_secret);
-		atomic_swap_32( &syn_cookie_secrets.idx, next_idx );
-		atomic_swap_32( &syn_cookie_secrets.refresh_time, tcp_now );
-	}
-	splx(s);
-}
