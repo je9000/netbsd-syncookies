@@ -278,6 +278,10 @@ static struct {
  * support is an 8 byte MSS. That's still unreasonably small, but
  * it's conceivable one could derive that as a possible MSS from a
  * (twisted) reading of the RFC.
+ *
+ * syn_cookie_check_seq returns the recovered MSS or 0 on failure.
+ * If at some point 0 becomes a valid MSS (is added to this table),
+ * that function will need to be changed.
  */
 static u_int16_t tcp_sc_msstab[] = { 8, 256, 468, 536, 996, 1452, 1460, 8960 };
 
@@ -580,7 +584,7 @@ tcp_reass(struct tcpcb *tp, const struct tcphdr *th, struct mbuf *m, int *tlen)
 		 */
 		if (q->ipqe_seq + q->ipqe_len == pkt_seq) {
 #ifdef TCPREASS_DEBUG
-			printf("tcp_reass[%p]: concat %u:%u(%u) to %u:%u(%u)\n",
+			Printf("tcp_reass[%p]: concat %u:%u(%u) to %u:%u(%u)\n",
 			       tp, pkt_seq, pkt_seq + pkt_len, pkt_len,
 			       q->ipqe_seq, q->ipqe_seq + q->ipqe_len, q->ipqe_len);
 #endif
@@ -1705,11 +1709,12 @@ findpcb:
 					 */
 					goto badsyn;
 				} else if (tiflags & TH_ACK) {
+					struct socket *oso = so;
 					so = syn_cache_get(&src.sa, &dst.sa,
 						th, toff, tlen, so, m);
 					if (so == NULL)
 						so = syn_cookie_validate(&src.sa, &dst.sa,
-	                        th, toff, tlen, so, m, optp, optlen, &opti);
+	                        th, toff, tlen, oso, m, optp, optlen, &opti);
 					if (so == NULL) {
 						/*
 						 * We don't have a SYN for
@@ -4065,6 +4070,7 @@ syn_cache_promote(struct sockaddr *src, struct sockaddr *dst,
 #ifdef INET
 	case AF_INET:
 		inp = sotoinpcb(so);
+	/* XXX Check if this was successful? --je */
 		break;
 #endif
 #ifdef INET6
@@ -4300,6 +4306,10 @@ abort:
 	if (so != NULL) {
 		(void) soqremque(so, 1);
 		(void) soabort(so);
+		/* Why do we acquire this lock here? We don't release it
+		 * here or in tcp_input. Who is supposed to release this?
+		 * XXX --je
+		 */
 		mutex_enter(softnet_lock);
 	}
 	TCP_STATINC(TCP_STAT_SC_ABORTED);
@@ -4923,13 +4933,17 @@ syn_cache_respond(struct syn_cache *sc, struct mbuf *m)
  * cookie is subject to change, see the documented functions below.
  *
  * When possible we will encode further information into the TCP
- * timestamp field.
+ * timestamp field as follows:
  *
  *  0                   1                   2                   3   
  *  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 
  * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
  * | R Scale |E|S|T|    Unused     |       Original client MSS     |
  * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *
+ * Please note that the bits are not in this order on the wire.
+ * This diagram shows only the logical layout and the on-wire
+ * format is endian-dependent.
  *
  * The bottom 4 bits are the bottom 4 bits of the client's
  * requested window scaling factor (4 bits are enough to cover all
@@ -4948,7 +4962,8 @@ syn_cache_respond(struct syn_cache *sc, struct mbuf *m)
  * almost exactly and will (supersede the MSS recovered from the
  * ISN). Currently, this header is only sent when the client asks
  * for TCP timestamps, though I believe we can send it whenever a
- * client sends any RFC 1323 option. This is a TODO.
+ * client sends any RFC 1323 option. Quick testing shows not all
+ * clients will respond, but researching this is a TODO.
  */
 
 /* Some parameters here are prefixed with an "i" unlike
@@ -5006,16 +5021,8 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 		ipopts = NULL;
 	}
 
-#ifdef TCP_SIGNATURE
-	if (ioptp || (tp->t_flags & TF_SIGNATURE))
-#else
 	if (ioptp)
-#endif
 	{
-		tb.t_flags = tcp_do_rfc1323 ? (TF_REQ_SCALE|TF_REQ_TSTMP) : 0;
-#ifdef TCP_SIGNATURE
-		tb.t_flags |= (tp->t_flags & TF_SIGNATURE);
-#endif
 		tb.t_state = TCPS_LISTEN;
 		if (tcp_dooptions(&tb, ioptp, ioptlen, ith, m, m->m_pkthdr.len -
 		    sizeof(struct tcphdr) - ioptlen - ihlen, ioi) < 0)
@@ -5444,16 +5451,8 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 		ipopts = NULL;
 	}
 
-#ifdef TCP_SIGNATURE
-	if (optp || (tp->t_flags & TF_SIGNATURE))
-#else
 	if (optp)
-#endif
 	{
-		tb.t_flags = tcp_do_rfc1323 ? (TF_REQ_SCALE|TF_REQ_TSTMP) : 0;
-#ifdef TCP_SIGNATURE
-		tb.t_flags |= (tp->t_flags & TF_SIGNATURE);
-#endif
 		tb.t_state = TCPS_LISTEN;
 		if (tcp_dooptions(&tb, optp, optlen, th, m, m->m_pkthdr.len -
 		    sizeof(struct tcphdr) - optlen - hlen, oi) < 0)
@@ -5492,8 +5491,12 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	bcopy(dst, &sc.sc_dst, dst->sa_len);
 	sc.sc_flags = 0;
 	sc.sc_ipopts = ipopts;
-	sc.sc_irs = th->th_seq;
-	sc.sc_iss = th->th_ack;
+	/* Get the original ISN by subtracting 1 from the final
+	 * ACK's sequence number. XXX Will this fail if there is
+	 * data in the first SYN packet? --je
+	 */
+	sc.sc_irs = th->th_seq - 1;
+	sc.sc_iss = th->th_ack - 1;
 	sc.sc_peermaxseg = recovered_mss;
 
 	/* Assume the mss we sent in the syn+ack is the same as we
