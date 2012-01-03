@@ -1009,7 +1009,7 @@ struct socket *syn_cookie_validate(struct sockaddr *, struct sockaddr *,
 		struct socket *so, struct mbuf *, u_char *, int,
 		struct tcp_opt_info *);
 u_int32_t	syn_cookie_hash_secret(struct sockaddr *, struct sockaddr *, u_int32_t);
-void	syn_cookie_generate_seq(struct sockaddr *, struct sockaddr *, struct tcphdr *, u_int16_t);
+u_int32_t	syn_cookie_generate_seq(struct sockaddr *, struct sockaddr *, u_int16_t);
 u_int16_t	syn_cookie_check_seq(struct sockaddr *, struct sockaddr *, struct tcphdr *);
 void	syn_cookie_regenerate_secrets(void);
 void	 syn_cache_init(void);

@@ -1257,6 +1257,7 @@ tcp_input(struct mbuf *m, ...)
 	short ostate = 0;
 #endif
 	u_long tiwin;
+
 	struct tcp_opt_info opti;
 	int off, iphlen;
 	va_list ap;
@@ -1897,7 +1898,7 @@ findpcb:
 				 * state for it.
 				 */
 				if (so->so_qlen <= so->so_qlimit) {
-					if ( tcp_syn_cookies ) {
+					if (tcp_syn_cookies) {
 						if (syn_cookie_reply(&src.sa, &dst.sa, th, tlen,
 							so, m, optp, optlen, &opti))
 						m = NULL;
@@ -4026,6 +4027,72 @@ syn_cache_get(struct sockaddr *src, struct sockaddr *dst,
 	/* Remove this cache entry */
 	syn_cache_rm(sc);
 	splx(s);
+printf("In syn_cache_get:\
+    sc_bucketq.tqe_next = %p \n\
+    sc_bucketq.tqe_prev = %p \n\
+    sc_timer._c_store[0] = %p \n\
+    sc_timer._c_store[1] = %p \n\
+    sc_route._ro_rt = %p \n\
+    sc_route.ro_sa = %p \n\
+    sc_route.ro_invalid = %i \n\
+    sc_win = %li \n\
+    sc_bucketidx = %i \n\
+    sc_hash = %u \n\
+    sc_timestamp = %u \n\
+    sc_timebase = %u \n\
+    sc_src.sin.sin_port = %hu \n\
+    sc_src.sin.sin_addr.s_addr = %u \n\
+    sc_src.sin.sin_family = %hu \n\
+    sc_dst.sin.sin_port = %hu \n\
+    sc_dst.sin.sin_addr.s_addr = %u \n\
+    sc_dst.sin.sin_family = %hu \n\
+    sc_irs = %u \n\
+    sc_iss = %u \n\
+    sc_rxtcur = %u \n\
+    sc_rxttot = %u \n\
+    sc_rxtshift = %hi \n\
+    sc_flags = %hi \n\
+    sc_ipopts = %p \n\
+    sc_peermaxseg = %hu \n\
+    sc_ourmaxseg = %hu \n\
+    sc_request_r_scale = %hhu \n\
+    sc_requested_s_scale = %hhu \n\
+    sc_tpq.le_next = %p \n\
+    sc_tpq.le_prev = %p \n\
+",
+    sc->sc_bucketq.tqe_next,
+    sc->sc_bucketq.tqe_prev,
+    sc->sc_timer._c_store[0],
+    sc->sc_timer._c_store[1],
+    sc->sc_route._ro_rt,
+    sc->sc_route.ro_sa,
+    sc->sc_route.ro_invalid,
+    sc->sc_win,
+    sc->sc_bucketidx,
+    sc->sc_hash,
+    sc->sc_timestamp,
+    sc->sc_timebase,
+    sc->sc_src.sin.sin_port,
+    sc->sc_src.sin.sin_addr.s_addr,
+    sc->sc_src.sin.sin_family,
+    sc->sc_dst.sin.sin_port,
+    sc->sc_dst.sin.sin_addr.s_addr,
+    sc->sc_dst.sin.sin_family,
+    sc->sc_irs,
+    sc->sc_iss,
+    sc->sc_rxtcur,
+    sc->sc_rxttot,
+    sc->sc_rxtshift,
+    sc->sc_flags,
+    sc->sc_ipopts,
+    sc->sc_peermaxseg,
+    sc->sc_ourmaxseg,
+    sc->sc_request_r_scale,
+    sc->sc_requested_s_scale,
+    sc->sc_tpq.le_next,
+    sc->sc_tpq.le_prev
+);
+
 	retval = syn_cache_promote(src, dst, th, hlen, tlen, so, m, sc);
 	s = splsoftnet();
 	syn_cache_put(sc);
@@ -4070,6 +4137,7 @@ syn_cache_promote(struct sockaddr *src, struct sockaddr *dst,
 #ifdef INET
 	case AF_INET:
 		inp = sotoinpcb(so);
+printf( "sotoinpcb = %p\n", inp );
 	/* XXX Check if this was successful? --je */
 		break;
 #endif
@@ -5137,7 +5205,7 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	if (ioi->maxseg < tcp_sc_msstab[0]) {
 		return 0;
 	}
-	syn_cookie_generate_seq(src, dst, th, ioi->maxseg);
+	th->th_seq = htonl(syn_cookie_generate_seq(src, dst, ioi->maxseg));
 
 	th->th_ack = htonl(ith->th_seq + 1);
 	th->th_off = (sizeof(struct tcphdr) + optlen) >> 2;
@@ -5568,6 +5636,72 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 #endif
 	sc.sc_tp = tp;
 
+printf("In syn_cookie_validate:\
+    sc_bucketq.tqe_next = %p \n\
+    sc_bucketq.tqe_prev = %p \n\
+    sc_timer._c_store[0] = %p \n\
+    sc_timer._c_store[1] = %p \n\
+    sc_route._ro_rt = %p \n\
+    sc_route.ro_sa = %p \n\
+    sc_route.ro_invalid = %i \n\
+    sc_win = %li \n\
+    sc_bucketidx = %i \n\
+    sc_hash = %u \n\
+    sc_timestamp = %u \n\
+    sc_timebase = %u \n\
+    sc_src.sin.sin_port = %hu \n\
+    sc_src.sin.sin_addr.s_addr = %u \n\
+    sc_src.sin.sin_family = %hu \n\
+    sc_dst.sin.sin_port = %hu \n\
+    sc_dst.sin.sin_addr.s_addr = %u \n\
+    sc_dst.sin.sin_family = %hu \n\
+    sc_irs = %u \n\
+    sc_iss = %u \n\
+    sc_rxtcur = %u \n\
+    sc_rxttot = %u \n\
+    sc_rxtshift = %hi \n\
+    sc_flags = %hi \n\
+    sc_ipopts = %p \n\
+    sc_peermaxseg = %hu \n\
+    sc_ourmaxseg = %hu \n\
+    sc_request_r_scale = %hhu \n\
+    sc_requested_s_scale = %hhu \n\
+    sc_tpq.le_next = %p \n\
+    sc_tpq.le_prev = %p \n\
+",
+    sc.sc_bucketq.tqe_next,
+    sc.sc_bucketq.tqe_prev,
+    sc.sc_timer._c_store[0],
+    sc.sc_timer._c_store[1],
+    sc.sc_route._ro_rt,
+    sc.sc_route.ro_sa,
+    sc.sc_route.ro_invalid,
+    sc.sc_win,
+    sc.sc_bucketidx,
+    sc.sc_hash,
+    sc.sc_timestamp,
+    sc.sc_timebase,
+    sc.sc_src.sin.sin_port,
+    sc.sc_src.sin.sin_addr.s_addr,
+    sc.sc_src.sin.sin_family,
+    sc.sc_dst.sin.sin_port,
+    sc.sc_dst.sin.sin_addr.s_addr,
+    sc.sc_dst.sin.sin_family,
+    sc.sc_irs,
+    sc.sc_iss,
+    sc.sc_rxtcur,
+    sc.sc_rxttot,
+    sc.sc_rxtshift,
+    sc.sc_flags,
+    sc.sc_ipopts,
+    sc.sc_peermaxseg,
+    sc.sc_ourmaxseg,
+    sc.sc_request_r_scale,
+    sc.sc_requested_s_scale,
+    sc.sc_tpq.le_next,
+    sc.sc_tpq.le_prev
+);
+
 	retval = syn_cache_promote(src, dst, th, hlen, tlen, so, m, &sc);
 	if (sc.sc_ipopts)
 		(void) m_free(sc.sc_ipopts);
@@ -5642,9 +5776,9 @@ u_int32_t syn_cookie_hash_secret(struct sockaddr *src,
 	return retval;
 }
 
-void
+u_int32_t
 syn_cookie_generate_seq(struct sockaddr *src, struct sockaddr *dst,
-	struct tcphdr *th, u_int16_t mss)
+	u_int16_t mss)
 {
 	u_int8_t msstab_entry;
 	u_int32_t new_seq;
@@ -5656,12 +5790,13 @@ syn_cookie_generate_seq(struct sockaddr *src, struct sockaddr *dst,
 
 	new_seq = syn_cookie_hash_secret(src, dst, syn_cookie_secrets.idx);
 
+printf( "Generated hash = %u, msstab = %i, secret.idx = %i, seq = ", new_seq & 0xFFFFFFF0, msstab_entry, syn_cookie_secrets.idx );
 	new_seq = ( new_seq & 0xFFFFFFF0 )
 			| (msstab_entry << 1)
 			| (syn_cookie_secrets.idx);
+printf( "%u\n", new_seq );
 
-	th->th_seq = new_seq;
-	return;
+	return new_seq;
 }
 
 u_int16_t
@@ -5670,16 +5805,19 @@ syn_cookie_check_seq(struct sockaddr *src, struct sockaddr *dst,
 {
 	u_int32_t expected_seq;
 	u_int32_t recovered_isn = th->th_ack - 1;
-	u_int32_t recovered_secret_idx = recovered_isn & 0x1;;
+	u_int32_t recovered_secret_idx = recovered_isn & 0x1;
 	u_int8_t recovered_msstab_entry;
 
-	recovered_secret_idx = recovered_isn & 0x1;
 	expected_seq = syn_cookie_hash_secret(src, dst, recovered_secret_idx);
+printf( "Checking seq = %u, expected %u, recovered secret.idx = %i\n", recovered_isn, expected_seq, recovered_secret_idx );
 
 	/* Cookies don't match! Get out of here. */
-	if ((expected_seq & 0xFFFFFFF0) == (recovered_isn & 0xFFFFFFF0))
+	if ((expected_seq & 0xFFFFFFF0) != (recovered_isn & 0xFFFFFFF0)) {
+printf( "Check failed.\n" );
 		return 0;
+	}
 	recovered_msstab_entry = (recovered_isn & 0x0000000E ) >> 1;
+printf( "Check passed, returning msstab entry = %i\n", recovered_msstab_entry );
 
 	return tcp_sc_msstab[recovered_msstab_entry];
 }
