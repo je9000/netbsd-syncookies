@@ -1902,7 +1902,7 @@ findpcb:
 						if (syn_cookie_reply(&src.sa, &dst.sa, th, tlen,
 							so, m, optp, optlen, &opti))
 						m = NULL;
-					} else { /* tcp_syn_cookies */
+					} else { /* not tcp_syn_cookies */
 					    if (syn_cache_add(&src.sa, &dst.sa, th, tlen,
 							so, m, optp, optlen, &opti))
 						m = NULL;
@@ -1928,6 +1928,7 @@ after_listen:
 	 * Reset idle time and keep-alive timer.
 	 */
 	tp->t_rcvtime = tcp_now;
+printf( "in after_listen, tp is %p, state is %i, HAVEESTABLISHED = %i, keepidle = %i\n", tp, tp->t_state, TCPS_HAVEESTABLISHED(tp->t_state), tp->t_keepidle );
 	if (TCPS_HAVEESTABLISHED(tp->t_state))
 		TCP_TIMER_ARM(tp, TCPT_KEEP, tp->t_keepidle);
 
@@ -2018,6 +2019,7 @@ after_listen:
 	    th->th_seq == tp->rcv_nxt &&
 	    tiwin && tiwin == tp->snd_wnd &&
 	    tp->snd_nxt == tp->snd_max) {
+printf( "Some bullshit\n" );
 
 		/*
 		 * If last ACK falls within this segment's sequence numbers,
@@ -2035,11 +2037,13 @@ after_listen:
 		}
 
 		if (tlen == 0) {
+printf( "What is ack prediction?\n" );
 			/* Ack prediction. */
 			if (SEQ_GT(th->th_ack, tp->snd_una) &&
 			    SEQ_LEQ(th->th_ack, tp->snd_max) &&
 			    tp->snd_cwnd >= tp->snd_wnd &&
 			    tp->t_partialacks < 0) {
+printf( "Whatever it is, we have it\n" );
 				/*
 				 * this is a pure ack for outstanding data.
 				 */
@@ -2220,6 +2224,7 @@ after_listen:
 	tp->rfbuf_ts = 0;
 	tp->rfbuf_cnt = 0;
 
+printf( "Some shit about the t_state = %i\n", tp->t_state );
 	switch (tp->t_state) {
 	/*
 	 * If the state is SYN_SENT:
@@ -2382,6 +2387,7 @@ after_listen:
 			tcps[TCP_STAT_PAWSDROP]++;
 			TCP_STAT_PUTREF();
 			tcp_new_dsack(tp, th->th_seq, tlen);
+printf( "Some bullshit about the sequence numbers is failing\n" );
 			goto dropafterack;
 		}
 	}
@@ -2616,6 +2622,7 @@ after_listen:
 	 * send an RST.
 	 */
 	case TCPS_SYN_RECEIVED:
+printf( "TCPS_SYN_RECEIVED\n" );
 		if (SEQ_GT(tp->snd_una, th->th_ack) ||
 		    SEQ_GT(th->th_ack, tp->snd_max))
 			goto dropwithreset;
@@ -2648,6 +2655,7 @@ after_listen:
 	case TCPS_CLOSING:
 	case TCPS_LAST_ACK:
 	case TCPS_TIME_WAIT:
+printf( "TCPS_ESTABLISHED and 100 other things\n" );
 
 		if (SEQ_LEQ(th->th_ack, tp->snd_una)) {
 			if (tlen == 0 && !dupseg && tiwin == tp->snd_wnd) {
@@ -2844,6 +2852,7 @@ after_listen:
 	}
 
 step6:
+printf( "Step6!!\n" );
 	/*
 	 * Update window information.
 	 * Don't look at window if no ACK: TAC's send garbage on first SYN.
@@ -3711,6 +3720,7 @@ do {									\
 static inline void
 syn_cache_rm(struct syn_cache *sc)
 {
+printf( "In syn_cache_rm\n" );
 	TAILQ_REMOVE(&tcp_syn_cache[sc->sc_bucketidx].sch_bucket,
 	    sc, sc_bucketq);
 	sc->sc_tp = NULL;
@@ -4137,7 +4147,6 @@ syn_cache_promote(struct sockaddr *src, struct sockaddr *dst,
 #ifdef INET
 	case AF_INET:
 		inp = sotoinpcb(so);
-printf( "sotoinpcb = %p\n", inp );
 	/* XXX Check if this was successful? --je */
 		break;
 #endif
@@ -4226,6 +4235,9 @@ printf( "sotoinpcb = %p\n", inp );
 	/*
 	 * Give the new socket our cached route reference.
 	 */
+	/* testing by je -- we don't save the route from the ip_output reply of the syn cookie
+	   so what do we do here? can we somehow flag this socket to do a routing lookup the
+       next time it needs to send data? Or do the routing lookup now? */
 	if (inp) {
 		rtcache_copy(&inp->inp_route, &sc->sc_route);
 		rtcache_free(&sc->sc_route);
@@ -4565,12 +4577,14 @@ syn_cache_add(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 	 * options into the reply.
 	 */
 	memset(sc, 0, sizeof(struct syn_cache));
+printf( "sc->sc_route is %p on line %i", sc->sc_route.ro_sa, __LINE__ );
 	callout_init(&sc->sc_timer, CALLOUT_MPSAFE);
 	bcopy(src, &sc->sc_src, src->sa_len);
 	bcopy(dst, &sc->sc_dst, dst->sa_len);
 	sc->sc_flags = 0;
 	sc->sc_ipopts = ipopts;
 	sc->sc_irs = th->th_seq;
+printf( "sc->sc_route is %p on line %i", sc->sc_route.ro_sa, __LINE__ );
 	switch (src->sa_family) {
 #ifdef INET
 	case AF_INET:
@@ -4597,6 +4611,7 @@ syn_cache_add(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 	    }
 #endif /* INET6 */
 	}
+printf( "sc->sc_route is %p on line %i", sc->sc_route.ro_sa, __LINE__ );
 	sc->sc_peermaxseg = oi->maxseg;
 	sc->sc_ourmaxseg = tcp_mss_to_advertise(m->m_flags & M_PKTHDR ?
 						m->m_pkthdr.rcvif : NULL,
@@ -4604,9 +4619,11 @@ syn_cache_add(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 	sc->sc_win = win;
 	sc->sc_timebase = tcp_now - 1;	/* see tcp_newtcpcb() */
 	sc->sc_timestamp = tb.ts_recent;
+printf( "sc->sc_route is %p on line %i", sc->sc_route.ro_sa, __LINE__ );
 	if ((tb.t_flags & (TF_REQ_TSTMP|TF_RCVD_TSTMP)) ==
 	    (TF_REQ_TSTMP|TF_RCVD_TSTMP))
 		sc->sc_flags |= SCF_TIMESTAMP;
+printf( "sc->sc_route is %p on line %i", sc->sc_route.ro_sa, __LINE__ );
 	if ((tb.t_flags & (TF_RCVD_SCALE|TF_REQ_SCALE)) ==
 	    (TF_RCVD_SCALE|TF_REQ_SCALE)) {
 		sc->sc_requested_s_scale = tb.requested_s_scale;
@@ -4652,6 +4669,7 @@ syn_cache_add(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 		sc->sc_flags |= SCF_SIGNATURE;
 #endif
 	sc->sc_tp = tp;
+printf( "sc->sc_route is %p on line %i", sc->sc_route.ro_sa, __LINE__ );
 	if (syn_cache_respond(sc, m) == 0) {
 		uint64_t *tcps = TCP_STAT_GETREF();
 		tcps[TCP_STAT_SNDACKS]++;
@@ -4692,6 +4710,7 @@ syn_cache_respond(struct syn_cache *sc, struct mbuf *m)
 	struct socket *so;
 
 	ro = &sc->sc_route;
+printf( "ro is %p\n", ro );
 	switch (sc->sc_src.sa.sa_family) {
 	case AF_INET:
 		hlen = sizeof(struct ip);
@@ -5103,14 +5122,6 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 						m->m_pkthdr.rcvif : NULL,
 						src->sa_family);
 
-	/* syn_cache_add gets ro from sc->route, ie, cached
-	 * routing information in the syncache entry. We don't
-	 * have a syncache table entry. I don't see anwhere where
-	 * the syncache entry could have gotten routing
-	 * information before syn_cache_reply is called, so we
-	 * will proceed without any cached route information for
-	 * now. -- je
-	 */
 	ro = NULL;
 	switch (src->sa_family) {
 	case AF_INET:
@@ -5229,7 +5240,7 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 
 	if (tb.t_flags & (TF_RCVD_SCALE|TF_REQ_SCALE)) {
 		u_int8_t our_request_r_scale = 0;
-		/* Shouldn't this value be acached? How often does
+		/* Shouldn't this value be cached? How often does
 		 * sb_max change? --je
 		 */
 		while (our_request_r_scale < TCP_MAX_WINSHIFT &&
@@ -5557,6 +5568,7 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	callout_init(&sc.sc_timer, CALLOUT_MPSAFE);
 	bcopy(src, &sc.sc_src, src->sa_len);
 	bcopy(dst, &sc.sc_dst, dst->sa_len);
+	sc.sc_route.ro_invalid = true; // This seems wrong, can't we copy this from somewhere?
 	sc.sc_flags = 0;
 	sc.sc_ipopts = ipopts;
 	/* Get the original ISN by subtracting 1 from the final
@@ -5636,6 +5648,13 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 #endif
 	sc.sc_tp = tp;
 
+	/* This is normally done via SYN_CACHE_TIMER_ARM, but
+	 * since we never call that (or touch the cache timer
+	 * at all, set it here manually. */
+    TCPT_RANGESET(sc.sc_rxtcur,                  \
+        TCPTV_SRTTDFLT * tcp_backoff[sc.sc_rxtshift], TCPTV_MIN, \
+        TCPTV_REXMTMAX);   
+
 printf("In syn_cookie_validate:\
     sc_bucketq.tqe_next = %p \n\
     sc_bucketq.tqe_prev = %p \n\
@@ -5703,6 +5722,7 @@ printf("In syn_cookie_validate:\
 );
 
 	retval = syn_cache_promote(src, dst, th, hlen, tlen, so, m, &sc);
+printf( "syn_cache_promote for syn_cookie_validate returning %p\n", retval );
 	if (sc.sc_ipopts)
 		(void) m_free(sc.sc_ipopts);
 	return retval;
@@ -5722,6 +5742,7 @@ syn_cookie_regenerate_secrets(void)
 	if (tcp_now > syn_cookie_secrets.refresh_time + (tcp_keepinit / 2)) {
 		mutex_enter(&syn_cookie_secrets.updating_lock);
 		if (tcp_now > ((volatile u_int32_t)syn_cookie_secrets.refresh_time) + (tcp_keepinit / 2)) {
+printf( "Regenerating syn cookie secrets\n" );
 			u_int32_t next_idx = syn_cookie_secrets.idx ? 0 : 1;
 			*syn_cookie_secrets.unused_secret = arc4random();
 			atomic_swap_ptr( &syn_cookie_secrets.secret[next_idx],
@@ -5754,7 +5775,7 @@ u_int32_t syn_cookie_hash_secret(struct sockaddr *src,
 		retval ^= ((struct sockaddr_in *) src)->sin_addr.s_addr;
 		retval += ((struct sockaddr_in *) dst)->sin_addr.s_addr;
 		retval ^= ((((struct sockaddr_in *) src)->sin_port << 16 )
-				& ((struct sockaddr_in *) src)->sin_port);
+				& ((struct sockaddr_in *) dst)->sin_port);
 		break;
 #endif
 #ifdef INET6
@@ -5762,7 +5783,7 @@ u_int32_t syn_cookie_hash_secret(struct sockaddr *src,
 		retval ^= ((struct sockaddr_in6 *) src)->sin6_addr.__u6_addr.__u6_addr32[3];
 		retval += ((struct sockaddr_in6 *) dst)->sin6_addr.__u6_addr.__u6_addr32[3];
 		retval ^= ((((struct sockaddr_in6 *) src)->sin6_port << 16 )
-				& ((struct sockaddr_in6 *) src)->sin6_port);
+				& ((struct sockaddr_in6 *) dst)->sin6_port);
 		break;
 #endif
 	default:
