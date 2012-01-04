@@ -1928,7 +1928,7 @@ after_listen:
 	 * Reset idle time and keep-alive timer.
 	 */
 	tp->t_rcvtime = tcp_now;
-printf( "in after_listen, tp is %p, state is %i, HAVEESTABLISHED = %i, keepidle = %i\n", tp, tp->t_state, TCPS_HAVEESTABLISHED(tp->t_state), tp->t_keepidle );
+//printf( "in after_listen, tp is %p, state is %i, HAVEESTABLISHED = %i, keepidle = %i\n", tp, tp->t_state, TCPS_HAVEESTABLISHED(tp->t_state), tp->t_keepidle );
 	if (TCPS_HAVEESTABLISHED(tp->t_state))
 		TCP_TIMER_ARM(tp, TCPT_KEEP, tp->t_keepidle);
 
@@ -2019,7 +2019,7 @@ printf( "in after_listen, tp is %p, state is %i, HAVEESTABLISHED = %i, keepidle 
 	    th->th_seq == tp->rcv_nxt &&
 	    tiwin && tiwin == tp->snd_wnd &&
 	    tp->snd_nxt == tp->snd_max) {
-printf( "Some bullshit\n" );
+//printf( "Some bullshit\n" );
 
 		/*
 		 * If last ACK falls within this segment's sequence numbers,
@@ -2037,13 +2037,13 @@ printf( "Some bullshit\n" );
 		}
 
 		if (tlen == 0) {
-printf( "What is ack prediction?\n" );
+//printf( "What is ack prediction?\n" );
 			/* Ack prediction. */
 			if (SEQ_GT(th->th_ack, tp->snd_una) &&
 			    SEQ_LEQ(th->th_ack, tp->snd_max) &&
 			    tp->snd_cwnd >= tp->snd_wnd &&
 			    tp->t_partialacks < 0) {
-printf( "Whatever it is, we have it\n" );
+//printf( "Whatever it is, we have it\n" );
 				/*
 				 * this is a pure ack for outstanding data.
 				 */
@@ -2224,7 +2224,7 @@ printf( "Whatever it is, we have it\n" );
 	tp->rfbuf_ts = 0;
 	tp->rfbuf_cnt = 0;
 
-printf( "Some shit about the t_state = %i\n", tp->t_state );
+//printf( "Some shit about the t_state = %i\n", tp->t_state );
 	switch (tp->t_state) {
 	/*
 	 * If the state is SYN_SENT:
@@ -2387,7 +2387,7 @@ printf( "Some shit about the t_state = %i\n", tp->t_state );
 			tcps[TCP_STAT_PAWSDROP]++;
 			TCP_STAT_PUTREF();
 			tcp_new_dsack(tp, th->th_seq, tlen);
-printf( "Some bullshit about the sequence numbers is failing\n" );
+//printf( "Some bullshit about the sequence numbers is failing\n" );
 			goto dropafterack;
 		}
 	}
@@ -2622,7 +2622,7 @@ printf( "Some bullshit about the sequence numbers is failing\n" );
 	 * send an RST.
 	 */
 	case TCPS_SYN_RECEIVED:
-printf( "TCPS_SYN_RECEIVED\n" );
+//printf( "TCPS_SYN_RECEIVED\n" );
 		if (SEQ_GT(tp->snd_una, th->th_ack) ||
 		    SEQ_GT(th->th_ack, tp->snd_max))
 			goto dropwithreset;
@@ -2655,7 +2655,7 @@ printf( "TCPS_SYN_RECEIVED\n" );
 	case TCPS_CLOSING:
 	case TCPS_LAST_ACK:
 	case TCPS_TIME_WAIT:
-printf( "TCPS_ESTABLISHED and 100 other things\n" );
+//printf( "TCPS_ESTABLISHED and 100 other things\n" );
 
 		if (SEQ_LEQ(th->th_ack, tp->snd_una)) {
 			if (tlen == 0 && !dupseg && tiwin == tp->snd_wnd) {
@@ -2852,7 +2852,7 @@ printf( "TCPS_ESTABLISHED and 100 other things\n" );
 	}
 
 step6:
-printf( "Step6!!\n" );
+//printf( "Step6!!\n" );
 	/*
 	 * Update window information.
 	 * Don't look at window if no ACK: TAC's send garbage on first SYN.
@@ -4067,6 +4067,7 @@ printf("In syn_cache_get:\
     sc_ourmaxseg = %hu \n\
     sc_request_r_scale = %hhu \n\
     sc_requested_s_scale = %hhu \n\
+	sc_tp = %p \n\
     sc_tpq.le_next = %p \n\
     sc_tpq.le_prev = %p \n\
 ",
@@ -4099,6 +4100,7 @@ printf("In syn_cache_get:\
     sc->sc_ourmaxseg,
     sc->sc_request_r_scale,
     sc->sc_requested_s_scale,
+	sc->sc_tp,
     sc->sc_tpq.le_next,
     sc->sc_tpq.le_prev
 );
@@ -4577,14 +4579,13 @@ syn_cache_add(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 	 * options into the reply.
 	 */
 	memset(sc, 0, sizeof(struct syn_cache));
-printf( "sc->sc_route is %p on line %i", sc->sc_route.ro_sa, __LINE__ );
 	callout_init(&sc->sc_timer, CALLOUT_MPSAFE);
 	bcopy(src, &sc->sc_src, src->sa_len);
 	bcopy(dst, &sc->sc_dst, dst->sa_len);
 	sc->sc_flags = 0;
 	sc->sc_ipopts = ipopts;
 	sc->sc_irs = th->th_seq;
-printf( "sc->sc_route is %p on line %i", sc->sc_route.ro_sa, __LINE__ );
+
 	switch (src->sa_family) {
 #ifdef INET
 	case AF_INET:
@@ -4611,7 +4612,7 @@ printf( "sc->sc_route is %p on line %i", sc->sc_route.ro_sa, __LINE__ );
 	    }
 #endif /* INET6 */
 	}
-printf( "sc->sc_route is %p on line %i", sc->sc_route.ro_sa, __LINE__ );
+
 	sc->sc_peermaxseg = oi->maxseg;
 	sc->sc_ourmaxseg = tcp_mss_to_advertise(m->m_flags & M_PKTHDR ?
 						m->m_pkthdr.rcvif : NULL,
@@ -4619,11 +4620,11 @@ printf( "sc->sc_route is %p on line %i", sc->sc_route.ro_sa, __LINE__ );
 	sc->sc_win = win;
 	sc->sc_timebase = tcp_now - 1;	/* see tcp_newtcpcb() */
 	sc->sc_timestamp = tb.ts_recent;
-printf( "sc->sc_route is %p on line %i", sc->sc_route.ro_sa, __LINE__ );
+
 	if ((tb.t_flags & (TF_REQ_TSTMP|TF_RCVD_TSTMP)) ==
 	    (TF_REQ_TSTMP|TF_RCVD_TSTMP))
 		sc->sc_flags |= SCF_TIMESTAMP;
-printf( "sc->sc_route is %p on line %i", sc->sc_route.ro_sa, __LINE__ );
+
 	if ((tb.t_flags & (TF_RCVD_SCALE|TF_REQ_SCALE)) ==
 	    (TF_RCVD_SCALE|TF_REQ_SCALE)) {
 		sc->sc_requested_s_scale = tb.requested_s_scale;
@@ -4668,8 +4669,9 @@ printf( "sc->sc_route is %p on line %i", sc->sc_route.ro_sa, __LINE__ );
 	if (tb.t_flags & TF_SIGNATURE)
 		sc->sc_flags |= SCF_SIGNATURE;
 #endif
-	sc->sc_tp = tp;
-printf( "sc->sc_route is %p on line %i", sc->sc_route.ro_sa, __LINE__ );
+	//sc->sc_tp = tp;
+	sc->sc_tp = NULL; // why?? --je
+
 	if (syn_cache_respond(sc, m) == 0) {
 		uint64_t *tcps = TCP_STAT_GETREF();
 		tcps[TCP_STAT_SNDACKS]++;
@@ -5568,9 +5570,14 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	callout_init(&sc.sc_timer, CALLOUT_MPSAFE);
 	bcopy(src, &sc.sc_src, src->sa_len);
 	bcopy(dst, &sc.sc_dst, dst->sa_len);
-	sc.sc_route.ro_invalid = true; // This seems wrong, can't we copy this from somewhere?
 	sc.sc_flags = 0;
 	sc.sc_ipopts = ipopts;
+
+	/*
+	 */
+	rtcache_setdst(&sc.sc_route, src);
+	rtcache_init(&sc.sc_route);
+
 	/* Get the original ISN by subtracting 1 from the final
 	 * ACK's sequence number. XXX Will this fail if there is
 	 * data in the first SYN packet? --je
@@ -5685,6 +5692,7 @@ printf("In syn_cookie_validate:\
     sc_ourmaxseg = %hu \n\
     sc_request_r_scale = %hhu \n\
     sc_requested_s_scale = %hhu \n\
+	sc_tp = %p \n\
     sc_tpq.le_next = %p \n\
     sc_tpq.le_prev = %p \n\
 ",
@@ -5717,6 +5725,7 @@ printf("In syn_cookie_validate:\
     sc.sc_ourmaxseg,
     sc.sc_request_r_scale,
     sc.sc_requested_s_scale,
+	sc.sc_tp,
     sc.sc_tpq.le_next,
     sc.sc_tpq.le_prev
 );
