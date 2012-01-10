@@ -4149,7 +4149,7 @@ syn_cache_promote(struct sockaddr *src, struct sockaddr *dst,
 #ifdef INET
 	case AF_INET:
 		inp = sotoinpcb(so);
-	/* XXX Check if this was successful? --je */
+		/* XXX Check if this was successful? --je */
 		break;
 #endif
 #ifdef INET6
@@ -4256,9 +4256,14 @@ syn_cache_promote(struct sockaddr *src, struct sockaddr *dst,
 		goto resetandabort;
 	MCLAIM(am, &tcp_mowner);
 	am->m_len = src->sa_len;
+printf("Setting up in_pcbconnect with am = %p, len = %i, fam = %i, sin_addr = %i ->", am, src->sa_len, src->sa_family, ((struct sockaddr_in *)src)->sin_addr.s_addr );
+for(int x = 0; x < src->sa_len; x++ ) printf("%02X ", (unsigned char) src->sa_data[x] );
+printf("<-\n");
 	bcopy(src, mtod(am, void *), src->sa_len);
 	if (inp) {
+printf("in inp\n");
 		if (in_pcbconnect(inp, am, &lwp0)) {
+printf("oh no pcbconnect failed\n");
 			(void) m_free(am);
 			goto resetandabort;
 		}
@@ -4315,7 +4320,8 @@ syn_cache_promote(struct sockaddr *src, struct sockaddr *dst,
 	if (tp->t_template == 0) {
 		tp = tcp_drop(tp, ENOBUFS);	/* destroys socket */
 		so = NULL;
-		m_freem(m);
+printf("Double free of mbuf m\n");
+		m_freem(m); /* Double free of m XXX --je */
 		goto abort;
 	}
 
@@ -4380,6 +4386,9 @@ syn_cache_promote(struct sockaddr *src, struct sockaddr *dst,
 	tp->t_dupacks = 0;
 
 	TCP_STATINC(TCP_STAT_SC_COMPLETED);
+printf("returning from _promote with %i bytes of mbuf data, flags = %i, type = %i -> ", m->m_len, m->m_flags, m->m_type );
+for(int x = 0; x < m->m_len; x++ ) printf("%02X ", (unsigned int)mtod(m, unsigned char*)[x] );
+printf("<-\n");
 	return (so);
 
 resetandabort:
@@ -4669,8 +4678,7 @@ syn_cache_add(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 	if (tb.t_flags & TF_SIGNATURE)
 		sc->sc_flags |= SCF_SIGNATURE;
 #endif
-	//sc->sc_tp = tp;
-	sc->sc_tp = NULL; // why?? --je
+	sc->sc_tp = tp;
 
 	if (syn_cache_respond(sc, m) == 0) {
 		uint64_t *tcps = TCP_STAT_GETREF();
@@ -5069,6 +5077,7 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
     int ioptlen, struct tcp_opt_info *ioi)
 {
 	struct tcpcb tb, *tp;
+	long win;
 	struct mbuf *ipopts;
 	struct tcp_opt_info opti;
 #ifdef INET6
@@ -5085,8 +5094,8 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	struct tcphdr *th;
 	u_int hlen;
 	u_int16_t ourmaxseg;
-	long ourwin;
 
+printf( "In syn_cookie_reply\n" );
 	tp = sototcpcb(so);
 
 	memset(&opti, 0, sizeof(opti));
@@ -5096,6 +5105,13 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	 *
 	 * Note this check is performed in tcp_input() very early on.
 	 */
+
+	/*
+	 * Initialize some local state.
+	 */
+	win = sbspace(&so->so_rcv);
+	if (win > TCP_MAXWIN)
+		win = TCP_MAXWIN;
 
 	switch (src->sa_family) {
 #ifdef INET
@@ -5223,12 +5239,6 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
 	th->th_ack = htonl(ith->th_seq + 1);
 	th->th_off = (sizeof(struct tcphdr) + optlen) >> 2;
 	th->th_flags = TH_SYN|TH_ACK;
-
-	/* Variable storage size differences here are intentional in
-	 * that it's done this way in syn_cache_add/reply. --je */
-	ourwin = sbspace(&so->so_rcv);
-	if (ourwin > TCP_MAXWIN)
-		ourwin = TCP_MAXWIN;
 	th->th_win = htons(ourwin);
 	/* th_sum already 0 */
 	/* th_urp already 0 */
@@ -5508,12 +5518,14 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	u_int8_t recovered_do_ecn = 0;
 	u_int8_t recovered_do_ts = 0;
 
+printf( "In syn_cookie_validate\n" );
 	/* The return value will be 0 if we could not recover the
 	 * original mss (meaning we couldn't decode the ISN,
 	 * meaning the cookie is invalid.
 	 */
-	if ((recovered_mss = syn_cookie_check_seq(src, dst, th)) == 0)
-		return NULL;
+//	if ((recovered_mss = syn_cookie_check_seq(src, dst, th)) == 0)
+//		return NULL;
+recovered_mss = 1460;
 
 	tp = sototcpcb(so);
 
@@ -5573,7 +5585,7 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	sc.sc_flags = 0;
 	sc.sc_ipopts = ipopts;
 
-	/*
+	/* XXX testing --je
 	 */
 	rtcache_setdst(&sc.sc_route, src);
 	rtcache_init(&sc.sc_route);
@@ -5653,7 +5665,8 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	if (tb.t_flags & TF_SIGNATURE)
 		sc.sc_flags |= SCF_SIGNATURE;
 #endif
-	sc.sc_tp = tp;
+	//sc.sc_tp = tp;
+	sc.sc_tp = NULL; // why?? --je
 
 	/* This is normally done via SYN_CACHE_TIMER_ARM, but
 	 * since we never call that (or touch the cache timer
@@ -5731,9 +5744,12 @@ printf("In syn_cookie_validate:\
 );
 
 	retval = syn_cache_promote(src, dst, th, hlen, tlen, so, m, &sc);
-printf( "syn_cache_promote for syn_cookie_validate returning %p\n", retval );
+printf( "syn_cache_promote for syn_cookie_validate returning %p mbuf %p\n", retval, m );
 	if (sc.sc_ipopts)
 		(void) m_free(sc.sc_ipopts);
+	rtcache_free(&sc.sc_route);
+	callout_destroy(&sc.sc_timer);
+
 	return retval;
 }
 
