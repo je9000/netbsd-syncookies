@@ -996,6 +996,9 @@ int	 syn_cache_add(struct sockaddr *, struct sockaddr *,
 int	 syn_cookie_reply(struct sockaddr *, struct sockaddr *,
 		struct tcphdr *, unsigned int, struct socket *,
 		struct mbuf *, u_char *, int, struct tcp_opt_info *);
+int	 syn_cookie_reply2(struct sockaddr *, struct sockaddr *,
+		struct tcphdr *, unsigned int, struct socket *,
+		struct mbuf *, u_char *, int, struct tcp_opt_info *);
 void	 syn_cache_unreach(const struct sockaddr *, const struct sockaddr *,
 	   struct tcphdr *);
 struct socket *syn_cache_get(struct sockaddr *, struct sockaddr *,

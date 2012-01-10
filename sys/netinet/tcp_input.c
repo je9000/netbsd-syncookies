@@ -1899,7 +1899,7 @@ findpcb:
 				 */
 				if (so->so_qlen <= so->so_qlimit) {
 					if (tcp_syn_cookies) {
-						if (syn_cookie_reply(&src.sa, &dst.sa, th, tlen,
+						if (syn_cookie_reply2(&src.sa, &dst.sa, th, tlen,
 							so, m, optp, optlen, &opti))
 						m = NULL;
 					} else { /* not tcp_syn_cookies */
@@ -5239,7 +5239,7 @@ printf( "In syn_cookie_reply\n" );
 	th->th_ack = htonl(ith->th_seq + 1);
 	th->th_off = (sizeof(struct tcphdr) + optlen) >> 2;
 	th->th_flags = TH_SYN|TH_ACK;
-	th->th_win = htons(ourwin);
+	th->th_win = htons(win);
 	/* th_sum already 0 */
 	/* th_urp already 0 */
 
@@ -5492,6 +5492,164 @@ printf( "In syn_cookie_reply\n" );
 	return (error);
 }
 
+/* XXX If this works, convert it to place the struct syn_cache on the stack
+ * rather than allocated via pool_get. --je
+ */
+int
+syn_cookie_reply2(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
+    unsigned int hlen, struct socket *so, struct mbuf *m, u_char *optp,
+    int optlen, struct tcp_opt_info *oi)
+{
+	struct tcpcb tb, *tp;
+	long win;
+	struct syn_cache *sc;
+	struct mbuf *ipopts;
+	struct tcp_opt_info opti;
+	int s;
+
+	tp = sototcpcb(so);
+
+	memset(&opti, 0, sizeof(opti));
+
+	/*
+	 * RFC1122 4.2.3.10, p. 104: discard bcast/mcast SYN
+	 *
+	 * Note this check is performed in tcp_input() very early on.
+	 */
+
+	/*
+	 * Initialize some local state.
+	 */
+	win = sbspace(&so->so_rcv);
+	if (win > TCP_MAXWIN)
+		win = TCP_MAXWIN;
+
+	switch (src->sa_family) {
+#ifdef INET
+	case AF_INET:
+		/*
+		 * Remember the IP options, if any.
+		 */
+		ipopts = ip_srcroute();
+		break;
+#endif
+	default:
+		ipopts = NULL;
+	}
+
+#ifdef TCP_SIGNATURE
+	if (optp || (tp->t_flags & TF_SIGNATURE))
+#else
+	if (optp)
+#endif
+	{
+		tb.t_flags = tcp_do_rfc1323 ? (TF_REQ_SCALE|TF_REQ_TSTMP) : 0;
+#ifdef TCP_SIGNATURE
+		tb.t_flags |= (tp->t_flags & TF_SIGNATURE);
+#endif
+		tb.t_state = TCPS_LISTEN;
+		if (tcp_dooptions(&tb, optp, optlen, th, m, m->m_pkthdr.len -
+		    sizeof(struct tcphdr) - optlen - hlen, oi) < 0)
+			return (0);
+	} else
+		tb.t_flags = 0;
+
+	s = splsoftnet();
+	sc = pool_get(&syn_cache_pool, PR_NOWAIT);
+	splx(s);
+	if (sc == NULL) {
+		if (ipopts)
+			(void) m_free(ipopts);
+		return (0);
+	}
+
+	/*
+	 * Fill in the cache, and put the necessary IP and TCP
+	 * options into the reply.
+	 */
+	memset(sc, 0, sizeof(struct syn_cache));
+	callout_init(&sc->sc_timer, CALLOUT_MPSAFE);
+	bcopy(src, &sc->sc_src, src->sa_len);
+	bcopy(dst, &sc->sc_dst, dst->sa_len);
+	sc->sc_flags = 0;
+	sc->sc_ipopts = ipopts;
+	sc->sc_irs = th->th_seq;
+
+	sc->sc_iss = syn_cookie_generate_seq(src, dst, oi->maxseg);
+
+	sc->sc_peermaxseg = oi->maxseg;
+	sc->sc_ourmaxseg = tcp_mss_to_advertise(m->m_flags & M_PKTHDR ?
+						m->m_pkthdr.rcvif : NULL,
+						sc->sc_src.sa.sa_family);
+	sc->sc_win = win;
+	sc->sc_timebase = tcp_now - 1;	/* see tcp_newtcpcb() */
+	sc->sc_timestamp = tb.ts_recent;
+
+	if ((tb.t_flags & (TF_REQ_TSTMP|TF_RCVD_TSTMP)) ==
+	    (TF_REQ_TSTMP|TF_RCVD_TSTMP))
+		sc->sc_flags |= SCF_TIMESTAMP;
+
+	if ((tb.t_flags & (TF_RCVD_SCALE|TF_REQ_SCALE)) ==
+	    (TF_RCVD_SCALE|TF_REQ_SCALE)) {
+		sc->sc_requested_s_scale = tb.requested_s_scale;
+		sc->sc_request_r_scale = 0;
+		/*
+		 * Pick the smallest possible scaling factor that
+		 * will still allow us to scale up to sb_max.
+		 *
+		 * We do this because there are broken firewalls that
+		 * will corrupt the window scale option, leading to
+		 * the other endpoint believing that our advertised
+		 * window is unscaled.  At scale factors larger than
+		 * 5 the unscaled window will drop below 1500 bytes,
+		 * leading to serious problems when traversing these
+		 * broken firewalls.
+		 *
+		 * With the default sbmax of 256K, a scale factor
+		 * of 3 will be chosen by this algorithm.  Those who
+		 * choose a larger sbmax should watch out
+		 * for the compatiblity problems mentioned above.
+		 *
+		 * RFC1323: The Window field in a SYN (i.e., a <SYN>
+		 * or <SYN,ACK>) segment itself is never scaled.
+		 */
+		while (sc->sc_request_r_scale < TCP_MAX_WINSHIFT &&
+		    (TCP_MAXWIN << sc->sc_request_r_scale) < sb_max)
+			sc->sc_request_r_scale++;
+	} else {
+		sc->sc_requested_s_scale = 15;
+		sc->sc_request_r_scale = 15;
+	}
+	if ((tb.t_flags & TF_SACK_PERMIT) && tcp_do_sack)
+		sc->sc_flags |= SCF_SACK_PERMIT;
+
+	/*
+	 * ECN setup packet recieved.
+	 */
+	if ((th->th_flags & (TH_ECE|TH_CWR)) && tcp_do_ecn)
+		sc->sc_flags |= SCF_ECN_PERMIT;
+
+#ifdef TCP_SIGNATURE
+	if (tb.t_flags & TF_SIGNATURE)
+		sc->sc_flags |= SCF_SIGNATURE;
+#endif
+	sc->sc_tp = tp;
+
+	if (syn_cache_respond(sc, m) == 0) {
+		uint64_t *tcps = TCP_STAT_GETREF();
+		tcps[TCP_STAT_SNDACKS]++;
+		tcps[TCP_STAT_SNDTOTAL]++;
+		TCP_STAT_PUTREF();
+	} else {
+		/* XXX This isn't the right TCP_STAT to increment --je */
+		TCP_STATINC(TCP_STAT_SC_DROPPED);
+	}
+	s = splsoftnet();
+	pool_put(&syn_cache_pool, sc);
+	splx(s);
+	return (1);
+}
+
 /* syn_cache_get, our stateful cousin, doesn't take or modify the
  * oi parameter. It doesn't look like the caller will mind (as
  * tcp_input will re-process the header options), but if a
@@ -5523,9 +5681,8 @@ printf( "In syn_cookie_validate\n" );
 	 * original mss (meaning we couldn't decode the ISN,
 	 * meaning the cookie is invalid.
 	 */
-//	if ((recovered_mss = syn_cookie_check_seq(src, dst, th)) == 0)
-//		return NULL;
-recovered_mss = 1460;
+	if ((recovered_mss = syn_cookie_check_seq(src, dst, th)) == 0)
+		return NULL;
 
 	tp = sototcpcb(so);
 
