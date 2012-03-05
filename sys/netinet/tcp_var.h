@@ -996,9 +996,6 @@ int	 syn_cache_add(struct sockaddr *, struct sockaddr *,
 int	 syn_cookie_reply(struct sockaddr *, struct sockaddr *,
 		struct tcphdr *, unsigned int, struct socket *,
 		struct mbuf *, u_char *, int, struct tcp_opt_info *);
-int	 syn_cookie_reply2(struct sockaddr *, struct sockaddr *,
-		struct tcphdr *, unsigned int, struct socket *,
-		struct mbuf *, u_char *, int, struct tcp_opt_info *);
 void	 syn_cache_unreach(const struct sockaddr *, const struct sockaddr *,
 	   struct tcphdr *);
 struct socket *syn_cache_get(struct sockaddr *, struct sockaddr *,
@@ -1009,8 +1006,7 @@ struct socket *syn_cache_promote(struct sockaddr *, struct sockaddr *,
 		struct socket *so, struct mbuf *, struct syn_cache *);
 struct socket *syn_cookie_validate(struct sockaddr *, struct sockaddr *,
 		struct tcphdr *, unsigned int, unsigned int,
-		struct socket *so, struct mbuf *, u_char *, int,
-		struct tcp_opt_info *);
+		struct socket *so, struct mbuf *, u_char *, int);
 u_int32_t	syn_cookie_hash_secret(struct sockaddr *, struct sockaddr *, u_int32_t);
 u_int32_t	syn_cookie_generate_seq(struct sockaddr *, struct sockaddr *, u_int16_t);
 u_int16_t	syn_cookie_check_seq(struct sockaddr *, struct sockaddr *, struct tcphdr *);

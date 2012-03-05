@@ -1715,7 +1715,7 @@ findpcb:
 						th, toff, tlen, so, m);
 					if (so == NULL)
 						so = syn_cookie_validate(&src.sa, &dst.sa,
-	                        th, toff, tlen, oso, m, optp, optlen, &opti);
+	                        th, toff, tlen, oso, m, optp, optlen);
 					if (so == NULL) {
 						/*
 						 * We don't have a SYN for
@@ -1899,7 +1899,7 @@ findpcb:
 				 */
 				if (so->so_qlen <= so->so_qlimit) {
 					if (tcp_syn_cookies) {
-						if (syn_cookie_reply2(&src.sa, &dst.sa, th, tlen,
+						if (syn_cookie_reply(&src.sa, &dst.sa, th, tlen,
 							so, m, optp, optlen, &opti))
 						m = NULL;
 					} else { /* not tcp_syn_cookies */
@@ -1928,7 +1928,7 @@ after_listen:
 	 * Reset idle time and keep-alive timer.
 	 */
 	tp->t_rcvtime = tcp_now;
-//printf( "in after_listen, tp is %p, state is %i, HAVEESTABLISHED = %i, keepidle = %i\n", tp, tp->t_state, TCPS_HAVEESTABLISHED(tp->t_state), tp->t_keepidle );
+
 	if (TCPS_HAVEESTABLISHED(tp->t_state))
 		TCP_TIMER_ARM(tp, TCPT_KEEP, tp->t_keepidle);
 
@@ -2019,7 +2019,6 @@ after_listen:
 	    th->th_seq == tp->rcv_nxt &&
 	    tiwin && tiwin == tp->snd_wnd &&
 	    tp->snd_nxt == tp->snd_max) {
-//printf( "Some bullshit\n" );
 
 		/*
 		 * If last ACK falls within this segment's sequence numbers,
@@ -2037,13 +2036,12 @@ after_listen:
 		}
 
 		if (tlen == 0) {
-//printf( "What is ack prediction?\n" );
 			/* Ack prediction. */
 			if (SEQ_GT(th->th_ack, tp->snd_una) &&
 			    SEQ_LEQ(th->th_ack, tp->snd_max) &&
 			    tp->snd_cwnd >= tp->snd_wnd &&
 			    tp->t_partialacks < 0) {
-//printf( "Whatever it is, we have it\n" );
+
 				/*
 				 * this is a pure ack for outstanding data.
 				 */
@@ -2224,7 +2222,6 @@ after_listen:
 	tp->rfbuf_ts = 0;
 	tp->rfbuf_cnt = 0;
 
-//printf( "Some shit about the t_state = %i\n", tp->t_state );
 	switch (tp->t_state) {
 	/*
 	 * If the state is SYN_SENT:
@@ -2387,7 +2384,7 @@ after_listen:
 			tcps[TCP_STAT_PAWSDROP]++;
 			TCP_STAT_PUTREF();
 			tcp_new_dsack(tp, th->th_seq, tlen);
-//printf( "Some bullshit about the sequence numbers is failing\n" );
+
 			goto dropafterack;
 		}
 	}
@@ -2622,7 +2619,6 @@ after_listen:
 	 * send an RST.
 	 */
 	case TCPS_SYN_RECEIVED:
-//printf( "TCPS_SYN_RECEIVED\n" );
 		if (SEQ_GT(tp->snd_una, th->th_ack) ||
 		    SEQ_GT(th->th_ack, tp->snd_max))
 			goto dropwithreset;
@@ -2655,7 +2651,6 @@ after_listen:
 	case TCPS_CLOSING:
 	case TCPS_LAST_ACK:
 	case TCPS_TIME_WAIT:
-//printf( "TCPS_ESTABLISHED and 100 other things\n" );
 
 		if (SEQ_LEQ(th->th_ack, tp->snd_una)) {
 			if (tlen == 0 && !dupseg && tiwin == tp->snd_wnd) {
@@ -2852,7 +2847,6 @@ after_listen:
 	}
 
 step6:
-//printf( "Step6!!\n" );
 	/*
 	 * Update window information.
 	 * Don't look at window if no ACK: TAC's send garbage on first SYN.
@@ -3720,7 +3714,6 @@ do {									\
 static inline void
 syn_cache_rm(struct syn_cache *sc)
 {
-printf( "In syn_cache_rm\n" );
 	TAILQ_REMOVE(&tcp_syn_cache[sc->sc_bucketidx].sch_bucket,
 	    sc, sc_bucketq);
 	sc->sc_tp = NULL;
@@ -4037,73 +4030,6 @@ syn_cache_get(struct sockaddr *src, struct sockaddr *dst,
 	/* Remove this cache entry */
 	syn_cache_rm(sc);
 	splx(s);
-printf("In syn_cache_get:\
-    sc_bucketq.tqe_next = %p \n\
-    sc_bucketq.tqe_prev = %p \n\
-    sc_timer._c_store[0] = %p \n\
-    sc_timer._c_store[1] = %p \n\
-    sc_route._ro_rt = %p \n\
-    sc_route.ro_sa = %p \n\
-    sc_route.ro_invalid = %i \n\
-    sc_win = %li \n\
-    sc_bucketidx = %i \n\
-    sc_hash = %u \n\
-    sc_timestamp = %u \n\
-    sc_timebase = %u \n\
-    sc_src.sin.sin_port = %hu \n\
-    sc_src.sin.sin_addr.s_addr = %u \n\
-    sc_src.sin.sin_family = %hu \n\
-    sc_dst.sin.sin_port = %hu \n\
-    sc_dst.sin.sin_addr.s_addr = %u \n\
-    sc_dst.sin.sin_family = %hu \n\
-    sc_irs = %u \n\
-    sc_iss = %u \n\
-    sc_rxtcur = %u \n\
-    sc_rxttot = %u \n\
-    sc_rxtshift = %hi \n\
-    sc_flags = %hi \n\
-    sc_ipopts = %p \n\
-    sc_peermaxseg = %hu \n\
-    sc_ourmaxseg = %hu \n\
-    sc_request_r_scale = %hhu \n\
-    sc_requested_s_scale = %hhu \n\
-	sc_tp = %p \n\
-    sc_tpq.le_next = %p \n\
-    sc_tpq.le_prev = %p \n\
-",
-    sc->sc_bucketq.tqe_next,
-    sc->sc_bucketq.tqe_prev,
-    sc->sc_timer._c_store[0],
-    sc->sc_timer._c_store[1],
-    sc->sc_route._ro_rt,
-    sc->sc_route.ro_sa,
-    sc->sc_route.ro_invalid,
-    sc->sc_win,
-    sc->sc_bucketidx,
-    sc->sc_hash,
-    sc->sc_timestamp,
-    sc->sc_timebase,
-    sc->sc_src.sin.sin_port,
-    sc->sc_src.sin.sin_addr.s_addr,
-    sc->sc_src.sin.sin_family,
-    sc->sc_dst.sin.sin_port,
-    sc->sc_dst.sin.sin_addr.s_addr,
-    sc->sc_dst.sin.sin_family,
-    sc->sc_irs,
-    sc->sc_iss,
-    sc->sc_rxtcur,
-    sc->sc_rxttot,
-    sc->sc_rxtshift,
-    sc->sc_flags,
-    sc->sc_ipopts,
-    sc->sc_peermaxseg,
-    sc->sc_ourmaxseg,
-    sc->sc_request_r_scale,
-    sc->sc_requested_s_scale,
-	sc->sc_tp,
-    sc->sc_tpq.le_next,
-    sc->sc_tpq.le_prev
-);
 
 	retval = syn_cache_promote(src, dst, th, hlen, tlen, so, m, sc);
 	s = splsoftnet();
@@ -4256,14 +4182,12 @@ syn_cache_promote(struct sockaddr *src, struct sockaddr *dst,
 		goto resetandabort;
 	MCLAIM(am, &tcp_mowner);
 	am->m_len = src->sa_len;
-printf("Setting up in_pcbconnect with am = %p, len = %i, fam = %i, sin_addr = %i ->", am, src->sa_len, src->sa_family, ((struct sockaddr_in *)src)->sin_addr.s_addr );
-for(int x = 0; x < src->sa_len; x++ ) printf("%02X ", (unsigned char) src->sa_data[x] );
-printf("<-\n");
+//printf("Setting up in_pcbconnect with am = %p, len = %i, fam = %i, sin_addr = %i ->", am, src->sa_len, src->sa_family, ((struct sockaddr_in *)src)->sin_addr.s_addr );
+//for(int x = 0; x < src->sa_len; x++ ) printf("%02X ", (unsigned char) src->sa_data[x] );
+//printf("<-\n");
 	bcopy(src, mtod(am, void *), src->sa_len);
 	if (inp) {
-printf("in inp\n");
 		if (in_pcbconnect(inp, am, &lwp0)) {
-printf("oh no pcbconnect failed\n");
 			(void) m_free(am);
 			goto resetandabort;
 		}
@@ -4386,9 +4310,10 @@ printf("Double free of mbuf m\n");
 	tp->t_dupacks = 0;
 
 	TCP_STATINC(TCP_STAT_SC_COMPLETED);
-printf("returning from _promote with %i bytes of mbuf data, flags = %i, type = %i -> ", m->m_len, m->m_flags, m->m_type );
-for(int x = 0; x < m->m_len; x++ ) printf("%02X ", (unsigned int)mtod(m, unsigned char*)[x] );
-printf("<-\n");
+//printf("returning from _promote with %i bytes of mbuf data, flags = %i, type = %i -> ", m->m_len, m->m_flags, m->m_type );
+//for(int x = 0; x < m->m_len; x++ ) printf("%02X ", (unsigned int)mtod(m, unsigned char*)[x] );
+//printf("<-\n");
+// XXX je
 	return (so);
 
 resetandabort:
@@ -4720,7 +4645,7 @@ syn_cache_respond(struct syn_cache *sc, struct mbuf *m)
 	struct socket *so;
 
 	ro = &sc->sc_route;
-printf( "ro is %p\n", ro );
+
 	switch (sc->sc_src.sa.sa_family) {
 	case AF_INET:
 		hlen = sizeof(struct ip);
@@ -5063,449 +4988,24 @@ printf( "ro is %p\n", ro );
  * clients will respond, but researching this is a TODO.
  */
 
-/* Some parameters here are prefixed with an "i" unlike
- * similar above functions (which use standardized names).
- * This function needs references to both the reply packet
- * it is building and the one it is replying to, and in
- * order to keep varaibles in code similar to
- * syn_cache_reply, the parameters were changed to reflect
- * they are for the "input" packet.
+/* XXX TODO:
+ *
+ * Don't bother setting variables syn_cache_reply won't check.
+ *
+ * Do we need to do that route cache stuff?
+ *
+ * --je
  */
 int
-syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *ith,
-    unsigned int ihlen, struct socket *so, struct mbuf *m, u_char *ioptp,
-    int ioptlen, struct tcp_opt_info *ioi)
-{
-	struct tcpcb tb, *tp;
-	long win;
-	struct mbuf *ipopts;
-	struct tcp_opt_info opti;
-#ifdef INET6
-	struct rtentry *rt;
-#endif
-	struct route *ro;
-	u_int8_t *optp;
-	int optlen, error;
-	u_int16_t tlen;
-	struct ip *ip = NULL;
-#ifdef INET6
-	struct ip6_hdr *ip6 = NULL;
-#endif
-	struct tcphdr *th;
-	u_int hlen;
-	u_int16_t ourmaxseg;
-
-printf( "In syn_cookie_reply\n" );
-	tp = sototcpcb(so);
-
-	memset(&opti, 0, sizeof(opti));
-
-	/*
-	 * RFC1122 4.2.3.10, p. 104: discard bcast/mcast SYN
-	 *
-	 * Note this check is performed in tcp_input() very early on.
-	 */
-
-	/*
-	 * Initialize some local state.
-	 */
-	win = sbspace(&so->so_rcv);
-	if (win > TCP_MAXWIN)
-		win = TCP_MAXWIN;
-
-	switch (src->sa_family) {
-#ifdef INET
-	case AF_INET:
-		/*
-		 * Remember the IP options, if any.
-		 */
-		ipopts = ip_srcroute();
-		break;
-#endif
-	default:
-		ipopts = NULL;
-	}
-
-	if (ioptp)
-	{
-		tb.t_state = TCPS_LISTEN;
-		if (tcp_dooptions(&tb, ioptp, ioptlen, ith, m, m->m_pkthdr.len -
-		    sizeof(struct tcphdr) - ioptlen - ihlen, ioi) < 0)
-			return (0);
-	} else
-		tb.t_flags = 0;
-
-	/* Do this before we free the mbuf from the sender. */
-	ourmaxseg = tcp_mss_to_advertise(m->m_flags & M_PKTHDR ?
-						m->m_pkthdr.rcvif : NULL,
-						src->sa_family);
-
-	ro = NULL;
-	switch (src->sa_family) {
-	case AF_INET:
-		hlen = sizeof(struct ip);
-		break;
-#ifdef INET6
-	case AF_INET6:
-		hlen = sizeof(struct ip6_hdr);
-		break;
-#endif
-	default:
-		if (m)
-			m_freem(m);
-		return (EAFNOSUPPORT);
-	}
-
-	/* Compute the size of the TCP options. */
-	optlen = 4 + (tb.t_flags & (TF_RCVD_SCALE|TF_REQ_SCALE) ? 4 : 0) +
-	    ((tb.t_flags & TF_SACK_PERMIT) && tcp_do_sack ? (TCPOLEN_SACK_PERMITTED + 2) : 0) +
-#ifdef TCP_SIGNATURE
-	    ((tb.t_flags & TF_SIGNATURE) ? (TCPOLEN_SIGNATURE + 2) : 0) +
-#endif
-	    ((tb.t_flags & (TF_REQ_TSTMP|TF_RCVD_TSTMP)) ? TCPOLEN_TSTAMP_APPA : 0);
-
-	tlen = hlen + sizeof(struct tcphdr) + optlen;
-
-	/*
-	 * Create the IP+TCP header from scratch.
-	 */
-	if (m)
-		m_freem(m);
-#ifdef DIAGNOSTIC
-	if (max_linkhdr + tlen > MCLBYTES)
-		return (ENOBUFS);
-#endif
-	MGETHDR(m, M_DONTWAIT, MT_DATA);
-	if (m && (max_linkhdr + tlen) > MHLEN) {
-		MCLGET(m, M_DONTWAIT);
-		if ((m->m_flags & M_EXT) == 0) {
-			m_freem(m);
-			m = NULL;
-		}
-	}
-	if (m == NULL)
-		return (ENOBUFS);
-	MCLAIM(m, &tcp_tx_mowner);
-
-	/* Fixup the mbuf. */
-	m->m_data += max_linkhdr;
-	m->m_len = m->m_pkthdr.len = tlen;
-	m->m_pkthdr.rcvif = NULL;
-	memset(mtod(m, u_char *), 0, tlen);
-
-	switch (src->sa_family) {
-	/* Should this get an #ifdef INET ? --je */
-	case AF_INET:
-		ip = mtod(m, struct ip *);
-		ip->ip_v = 4;
-		ip->ip_dst = ((struct sockaddr_in *) src)->sin_addr;
-		ip->ip_src = ((struct sockaddr_in *) dst)->sin_addr;
-		ip->ip_p = IPPROTO_TCP;
-		th = (struct tcphdr *)(ip + 1);
-		th->th_dport = ((struct sockaddr_in *) src)->sin_port;
-		th->th_sport = ((struct sockaddr_in *) dst)->sin_port;
-		break;
-#ifdef INET6
-	case AF_INET6:
-		ip6 = mtod(m, struct ip6_hdr *);
-		ip6->ip6_vfc = IPV6_VERSION;
-		ip6->ip6_dst = ((struct sockaddr_in6 *) src)->sin6_addr;
-		ip6->ip6_src = ((struct sockaddr_in6 *) dst)->sin6_addr;
-		ip6->ip6_nxt = IPPROTO_TCP;
-		/* ip6_plen will be updated in ip6_output() */
-		th = (struct tcphdr *)(ip6 + 1);
-		th->th_dport = ((struct sockaddr_in6 *) src)->sin6_port;
-		th->th_sport = ((struct sockaddr_in6 *) dst)->sin6_port;
-		break;
-#endif
-	default:
-		/* If we hit this point we'll cause a panic later on
-		 * when we try and dereference th. This code is
-		 * present in syn_cache_reply too, so it probably
-		 * needs to be corrected in both locations. --je
-		 */ 
-		th = NULL;
-	}
-
-	/* I don't know if this is the best place to do this, but
-	 * we should reject clients who ask for an MSS we can't
-	 * service (or doesn't make sense!).
-	 */
-	if (ioi->maxseg < tcp_sc_msstab[0]) {
-		return 0;
-	}
-	th->th_seq = htonl(syn_cookie_generate_seq(src, dst, ioi->maxseg));
-
-	th->th_ack = htonl(ith->th_seq + 1);
-	th->th_off = (sizeof(struct tcphdr) + optlen) >> 2;
-	th->th_flags = TH_SYN|TH_ACK;
-	th->th_win = htons(win);
-	/* th_sum already 0 */
-	/* th_urp already 0 */
-
-	/* Tack on the TCP options. */
-	optp = (u_int8_t *)(th + 1);
-	*optp++ = TCPOPT_MAXSEG;
-	*optp++ = 4;
-	*optp++ = (ourmaxseg >> 8) & 0xff;
-	*optp++ = ourmaxseg & 0xff;
-
-	if (tb.t_flags & (TF_RCVD_SCALE|TF_REQ_SCALE)) {
-		u_int8_t our_request_r_scale = 0;
-		/* Shouldn't this value be cached? How often does
-		 * sb_max change? --je
-		 */
-		while (our_request_r_scale < TCP_MAX_WINSHIFT &&
-		    (TCP_MAXWIN << our_request_r_scale) < sb_max)
-			our_request_r_scale++;
-
-		*((u_int32_t *)optp) = htonl(TCPOPT_NOP << 24 |
-		    TCPOPT_WINDOW << 16 | TCPOLEN_WINDOW << 8 |
-		    our_request_r_scale);
-		optp += 4;
-	}
-
-	/* Fix up the scaling factor here. If the didn't request
-	 * one, set the appropriate flag in the tcpcb (which we
-	 * then put in the outgoing timestamp header). 15 is the
-	 * flag for "no window scaling was requested".
-	 */
-	if (!(tb.t_flags & TF_RCVD_SCALE)) {
-		tb.requested_s_scale = 15;
-	}
-
-	/* Store stuff here! This is just a test. maxseg is
-	 * 16 bits and requested_s_scale requires 4 (RFC 1323
-	 * states the field is 8 bits in size, but the field
-	 * maximum value is limited to 14, which can be
-	 * encoded in 4 bits), that leaves us 4 more bits to
-	 * work with.
-	 * Note that we don't call htonl() on the value but
-	 * doing so would prevent leak architecture endianness
-	 * to the client.
-	 *
-	 * Maybe we should violate the RFC and send a ts
-	 * regardless, since it's so useful to us. Does that
-	 * actually violate the RFC? I'm not completely sure.
-	 * Maybe detect if he sent any RFC 1323 option and if so
-	 * assume he will support timestamps? XXX --je
-	 */
-	if (tb.t_flags & (TF_REQ_TSTMP|TF_RCVD_TSTMP)) {
-		u_int32_t *lp = (u_int32_t *)(optp);
-		/* Form timestamp option as shown in appendix A of RFC 1323. */
-		*lp++ = htonl(TCPOPT_TSTAMP_HDR);
-		/* The offset bits for these flags should be constants.
-		   XXX --je
-		 */
-		*lp++ = (ioi->maxseg << 16)
-			| ((ith->th_flags & (TH_ECE|TH_CWR) ? 1 : 0) << 4)
-			| ((tb.t_flags & TF_SACK_PERMIT ? 1 : 0) << 5)
-			| ((tb.t_flags & (TF_REQ_TSTMP|TF_RCVD_TSTMP) ? 1 : 0) << 6)
-			| (tb.requested_s_scale & 0xF);
-		*lp   = htonl(tb.ts_recent);
-		optp += TCPOLEN_TSTAMP_APPA;
-	}
-
-	if ((tb.t_flags & TF_SACK_PERMIT) && tcp_do_sack) {
-		u_int8_t *p = optp;
-
-		/* Let the peer know that we will SACK. */
-		p[0] = TCPOPT_SACK_PERMITTED;
-		p[1] = 2;
-		p[2] = TCPOPT_NOP;
-		p[3] = TCPOPT_NOP;
-		optp += 4;
-	}
-
-	/*
-	 * Send ECN SYN-ACK setup packet.
-	 * Routes can be asymetric, so, even if we receive a packet
-	 * with ECE and CWR set, we must not assume no one will block
-	 * the ECE packet we are about to send.
-	 */
-	if ((ith->th_flags & (TH_ECE|TH_CWR)) && tcp_do_ecn
-		/* This block contains the following code in
-		 * syn_cache_reply:
-	         tp && SEQ_GEQ(tp->snd_nxt, tp->snd_max)
-		 * I'm not sure what this is checking. If the next seq
-		 * number we use is >= to the highest sent, ie, is this
-		 * a retransmit of an old packet? How could the syn+ack
-		 * ever be anything but the most recently sent packet?
-		 */
-		) {
-		th->th_flags |= TH_ECE;
-		TCP_STATINC(TCP_STAT_ECN_SHS);
-
-		/*
-		 * draft-ietf-tcpm-ecnsyn-00.txt
-		 *
-		 * "[...] a TCP node MAY respond to an ECN-setup
-		 * SYN packet by setting ECT in the responding
-		 * ECN-setup SYN/ACK packet, indicating to routers 
-		 * that the SYN/ACK packet is ECN-Capable.
-		 * This allows a congested router along the path
-		 * to mark the packet instead of dropping the
-		 * packet as an indication of congestion."
-		 *
-		 * "[...] There can be a great benefit in setting
-		 * an ECN-capable codepoint in SYN/ACK packets [...]
-		 * Congestion is  most likely to occur in
-		 * the server-to-client direction.  As a result,
-		 * setting an ECN-capable codepoint in SYN/ACK
-		 * packets can reduce the occurence of three-second
-		 * retransmit timeouts resulting from the drop
-		 * of SYN/ACK packets."
-		 *
-		 * Page 4 and 6, January 2006.
-		 */
-
-		switch (src->sa_family) {
-#ifdef INET
-		case AF_INET:
-			ip->ip_tos |= IPTOS_ECN_ECT0;
-			break;
-#endif
-#ifdef INET6
-		case AF_INET6:
-			ip6->ip6_flow |= htonl(IPTOS_ECN_ECT0 << 20);
-			break;
-#endif
-		}
-		TCP_STATINC(TCP_STAT_ECN_ECT);
-	}
-
-	/* Why is there no sysctl for TCP signatures? XXX --je */
-#ifdef TCP_SIGNATURE
-	if (tb.t_flags & TF_SIGNATURE) {
-		struct secasvar *sav;
-		u_int8_t *sigp;
-
-		sav = tcp_signature_getsav(m, th);
-
-		if (sav == NULL) {
-			if (m)
-				m_freem(m);
-			/* I think this should be EAFNOSUPPORT per
-			 * tcp_signature_getsav's return conditions? XXX
-			 * --je
-			 */
-			return (EPERM);
-		}
-
-		*optp++ = TCPOPT_SIGNATURE;
-		*optp++ = TCPOLEN_SIGNATURE;
-		sigp = optp;
-		memset(optp, 0, TCP_SIGLEN);
-		optp += TCP_SIGLEN;
-		*optp++ = TCPOPT_NOP;
-		*optp++ = TCPOPT_EOL;
-
-		(void)tcp_signature(m, th, hlen, sav, sigp);
-
-		key_sa_recordxfer(sav, m);
-#ifdef FAST_IPSEC
-		KEY_FREESAV(&sav);
-#else
-		key_freesav(sav);
-#endif
-	}
-#endif
-
-	/* Compute the packet's checksum. */
-	switch (src->sa_family) {
-	case AF_INET:
-		ip->ip_len = htons(tlen - hlen);
-		th->th_sum = 0;
-		th->th_sum = in4_cksum(m, IPPROTO_TCP, hlen, tlen - hlen);
-		break;
-#ifdef INET6
-	case AF_INET6:
-		ip6->ip6_plen = htons(tlen - hlen);
-		th->th_sum = 0;
-		th->th_sum = in6_cksum(m, IPPROTO_TCP, hlen, tlen - hlen);
-		break;
-#endif
-	}
-
-	/*
-	 * Fill in some straggling IP bits.  Note the stack expects
-	 * ip_len to be in host order, for convenience.
-	 */
-	switch (src->sa_family) {
-#ifdef INET
-	case AF_INET:
-		ip->ip_len = htons(tlen);
-		ip->ip_ttl = ip_defttl;
-		/* XXX tos? */
-		break;
-#endif
-#ifdef INET6
-	case AF_INET6:
-		ip6->ip6_vfc &= ~IPV6_VERSION_MASK;
-		ip6->ip6_vfc |= IPV6_VERSION;
-		ip6->ip6_plen = htons(tlen - hlen);
-		/* ip6_hlim will be initialized afterwards */
-		/* XXX flowlabel? */
-		break;
-#endif
-	}
-
-	/* XXX use IPsec policy on listening socket, on SYN ACK */
-	/* What is the point of this? Isn't that where tp
-	 * points already? We only have one socket. --je
-	tp = sc->sc_tp;
-	 */
-
-	switch (src->sa_family) {
-#ifdef INET
-	case AF_INET:
-		error = ip_output(m, ipopts, ro,
-		    (ip_mtudisc ? IP_MTUDISC : 0),
-		    (struct ip_moptions *)NULL, so);
-		break;
-#endif
-#ifdef INET6
-	case AF_INET6:
-		ip6->ip6_hlim = in6_selecthlim(NULL,
-				(rt = rtcache_validate(ro)) != NULL ? rt->rt_ifp
-				                                    : NULL);
-
-		error = ip6_output(m, NULL /*XXX*/, ro, 0, NULL, so, NULL);
-		break;
-#endif
-	default:
-		/* We're really inconsistent with the default case in
-		 * these sa_family switch statements. XXX --je
-		 */
-		error = EAFNOSUPPORT;
-		break;
-	}
-
-	/* No errors! */
-	if (error == 0) {
-		uint64_t *tcps = TCP_STAT_GETREF();
-		tcps[TCP_STAT_SNDACKS]++;
-		tcps[TCP_STAT_SNDTOTAL]++;
-		TCP_STAT_PUTREF();
-	}
-
-	return (error);
-}
-
-/* XXX If this works, convert it to place the struct syn_cache on the stack
- * rather than allocated via pool_get. --je
- */
-int
-syn_cookie_reply2(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
+syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
     unsigned int hlen, struct socket *so, struct mbuf *m, u_char *optp,
     int optlen, struct tcp_opt_info *oi)
 {
 	struct tcpcb tb, *tp;
 	long win;
-	struct syn_cache *sc;
+	struct syn_cache sc;
 	struct mbuf *ipopts;
 	struct tcp_opt_info opti;
-	int s;
 
 	tp = sototcpcb(so);
 
@@ -5554,45 +5054,40 @@ syn_cookie_reply2(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 	} else
 		tb.t_flags = 0;
 
-	s = splsoftnet();
-	sc = pool_get(&syn_cache_pool, PR_NOWAIT);
-	splx(s);
-	if (sc == NULL) {
-		if (ipopts)
-			(void) m_free(ipopts);
-		return (0);
-	}
-
 	/*
 	 * Fill in the cache, and put the necessary IP and TCP
 	 * options into the reply.
 	 */
-	memset(sc, 0, sizeof(struct syn_cache));
-	callout_init(&sc->sc_timer, CALLOUT_MPSAFE);
-	bcopy(src, &sc->sc_src, src->sa_len);
-	bcopy(dst, &sc->sc_dst, dst->sa_len);
-	sc->sc_flags = 0;
-	sc->sc_ipopts = ipopts;
-	sc->sc_irs = th->th_seq;
+	memset(&sc, 0, sizeof(struct syn_cache));
+	callout_init(&sc.sc_timer, CALLOUT_MPSAFE);
+	bcopy(src, &sc.sc_src, src->sa_len);
+	bcopy(dst, &sc.sc_dst, dst->sa_len);
+	sc.sc_flags = 0;
+	sc.sc_ipopts = ipopts;
+	sc.sc_irs = th->th_seq;
 
-	sc->sc_iss = syn_cookie_generate_seq(src, dst, oi->maxseg);
+	sc.sc_iss = syn_cookie_generate_seq(src, dst, oi->maxseg);
 
-	sc->sc_peermaxseg = oi->maxseg;
-	sc->sc_ourmaxseg = tcp_mss_to_advertise(m->m_flags & M_PKTHDR ?
+	sc.sc_peermaxseg = oi->maxseg;
+	sc.sc_ourmaxseg = tcp_mss_to_advertise(m->m_flags & M_PKTHDR ?
 						m->m_pkthdr.rcvif : NULL,
-						sc->sc_src.sa.sa_family);
-	sc->sc_win = win;
-	sc->sc_timebase = tcp_now - 1;	/* see tcp_newtcpcb() */
-	sc->sc_timestamp = tb.ts_recent;
+						sc.sc_src.sa.sa_family);
+	sc.sc_win = win;
+	sc.sc_timebase = tcp_now - 1;	/* see tcp_newtcpcb() */
+	sc.sc_timestamp = (oi->maxseg << 16)
+			| ((th->th_flags & (TH_ECE|TH_CWR) ? 1 : 0) << 4)
+			| ((tb.t_flags & TF_SACK_PERMIT ? 1 : 0) << 5)
+			| ((tb.t_flags & (TF_REQ_TSTMP|TF_RCVD_TSTMP) ? 1 : 0) << 6)
+			| (tb.requested_s_scale & 0xF);
 
 	if ((tb.t_flags & (TF_REQ_TSTMP|TF_RCVD_TSTMP)) ==
 	    (TF_REQ_TSTMP|TF_RCVD_TSTMP))
-		sc->sc_flags |= SCF_TIMESTAMP;
+		sc.sc_flags |= SCF_TIMESTAMP;
 
 	if ((tb.t_flags & (TF_RCVD_SCALE|TF_REQ_SCALE)) ==
 	    (TF_RCVD_SCALE|TF_REQ_SCALE)) {
-		sc->sc_requested_s_scale = tb.requested_s_scale;
-		sc->sc_request_r_scale = 0;
+		sc.sc_requested_s_scale = tb.requested_s_scale;
+		sc.sc_request_r_scale = 0;
 		/*
 		 * Pick the smallest possible scaling factor that
 		 * will still allow us to scale up to sb_max.
@@ -5613,29 +5108,29 @@ syn_cookie_reply2(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 		 * RFC1323: The Window field in a SYN (i.e., a <SYN>
 		 * or <SYN,ACK>) segment itself is never scaled.
 		 */
-		while (sc->sc_request_r_scale < TCP_MAX_WINSHIFT &&
-		    (TCP_MAXWIN << sc->sc_request_r_scale) < sb_max)
-			sc->sc_request_r_scale++;
+		while (sc.sc_request_r_scale < TCP_MAX_WINSHIFT &&
+		    (TCP_MAXWIN << sc.sc_request_r_scale) < sb_max)
+			sc.sc_request_r_scale++;
 	} else {
-		sc->sc_requested_s_scale = 15;
-		sc->sc_request_r_scale = 15;
+		sc.sc_requested_s_scale = 15;
+		sc.sc_request_r_scale = 15;
 	}
 	if ((tb.t_flags & TF_SACK_PERMIT) && tcp_do_sack)
-		sc->sc_flags |= SCF_SACK_PERMIT;
+		sc.sc_flags |= SCF_SACK_PERMIT;
 
 	/*
 	 * ECN setup packet recieved.
 	 */
 	if ((th->th_flags & (TH_ECE|TH_CWR)) && tcp_do_ecn)
-		sc->sc_flags |= SCF_ECN_PERMIT;
+		sc.sc_flags |= SCF_ECN_PERMIT;
 
 #ifdef TCP_SIGNATURE
 	if (tb.t_flags & TF_SIGNATURE)
-		sc->sc_flags |= SCF_SIGNATURE;
+		sc.sc_flags |= SCF_SIGNATURE;
 #endif
-	sc->sc_tp = tp;
+	sc.sc_tp = tp;
 
-	if (syn_cache_respond(sc, m) == 0) {
+	if (syn_cache_respond(&sc, m) == 0) {
 		uint64_t *tcps = TCP_STAT_GETREF();
 		tcps[TCP_STAT_SNDACKS]++;
 		tcps[TCP_STAT_SNDTOTAL]++;
@@ -5644,27 +5139,19 @@ syn_cookie_reply2(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 		/* XXX This isn't the right TCP_STAT to increment --je */
 		TCP_STATINC(TCP_STAT_SC_DROPPED);
 	}
-	s = splsoftnet();
-	pool_put(&syn_cache_pool, sc);
-	splx(s);
 	return (1);
 }
 
-/* syn_cache_get, our stateful cousin, doesn't take or modify the
- * oi parameter. It doesn't look like the caller will mind (as
- * tcp_input will re-process the header options), but if a
- * problem arises we might want to keep this in mind.
- */
 struct socket *
 syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	struct tcphdr *th, unsigned int hlen, unsigned int tlen,
 	struct socket *so, struct mbuf *m, u_char *optp,
-	int optlen, struct tcp_opt_info *oi)
+	int optlen)
 {
 	struct syn_cache sc;
 	struct tcpcb tb, *tp;
 	struct mbuf *ipopts;
-	struct tcp_opt_info opti;
+	struct tcp_opt_info oi;
 	u_int16_t recovered_mss;
 	long ourwin;
 	struct socket *retval;
@@ -5676,7 +5163,6 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	u_int8_t recovered_do_ecn = 0;
 	u_int8_t recovered_do_ts = 0;
 
-printf( "In syn_cookie_validate\n" );
 	/* The return value will be 0 if we could not recover the
 	 * original mss (meaning we couldn't decode the ISN,
 	 * meaning the cookie is invalid.
@@ -5686,7 +5172,7 @@ printf( "In syn_cookie_validate\n" );
 
 	tp = sototcpcb(so);
 
-	memset(&opti, 0, sizeof(opti));
+	memset(&oi, 0, sizeof(oi));
 
 	switch (src->sa_family) {
 #ifdef INET
@@ -5705,7 +5191,7 @@ printf( "In syn_cookie_validate\n" );
 	{
 		tb.t_state = TCPS_LISTEN;
 		if (tcp_dooptions(&tb, optp, optlen, th, m, m->m_pkthdr.len -
-		    sizeof(struct tcphdr) - optlen - hlen, oi) < 0)
+		    sizeof(struct tcphdr) - optlen - hlen, &oi) < 0)
 			return (0);
 	} else
 		tb.t_flags = 0;
@@ -5718,15 +5204,15 @@ printf( "In syn_cookie_validate\n" );
 	 * other header options appear this way (but they may appear
 	 * as flags set inside the timestamp header sent by us!).
 	 */
-	if (oi->ts_present) {
-		recovered_mss = oi->ts_ecr >> 16;
-		recovered_requested_s_scale = oi->ts_ecr & 0x0F;
-		recovered_do_sack = oi->ts_ecr & 0x10;
-		recovered_do_ecn = oi->ts_ecr & 0x20;
-		recovered_do_ts = oi->ts_ecr & 0x30;
+	if (oi.ts_present) {
+		recovered_mss = oi.ts_ecr >> 16;
+		recovered_requested_s_scale = oi.ts_ecr & 0x0F;
+		recovered_do_sack = oi.ts_ecr & 0x10;
+		recovered_do_ecn = oi.ts_ecr & 0x20;
+		recovered_do_ts = oi.ts_ecr & 0x30;
 		if (recovered_do_ts) {
 			tb.t_flags |= TF_RCVD_TSTMP|TF_REQ_TSTMP;
-			tb.ts_recent = oi->ts_val;
+			tb.ts_recent = oi.ts_val;
 			tb.ts_recent_age = tcp_now;
 		}
 	}
@@ -5832,76 +5318,8 @@ printf( "In syn_cookie_validate\n" );
         TCPTV_SRTTDFLT * tcp_backoff[sc.sc_rxtshift], TCPTV_MIN, \
         TCPTV_REXMTMAX);   
 
-printf("In syn_cookie_validate:\
-    sc_bucketq.tqe_next = %p \n\
-    sc_bucketq.tqe_prev = %p \n\
-    sc_timer._c_store[0] = %p \n\
-    sc_timer._c_store[1] = %p \n\
-    sc_route._ro_rt = %p \n\
-    sc_route.ro_sa = %p \n\
-    sc_route.ro_invalid = %i \n\
-    sc_win = %li \n\
-    sc_bucketidx = %i \n\
-    sc_hash = %u \n\
-    sc_timestamp = %u \n\
-    sc_timebase = %u \n\
-    sc_src.sin.sin_port = %hu \n\
-    sc_src.sin.sin_addr.s_addr = %u \n\
-    sc_src.sin.sin_family = %hu \n\
-    sc_dst.sin.sin_port = %hu \n\
-    sc_dst.sin.sin_addr.s_addr = %u \n\
-    sc_dst.sin.sin_family = %hu \n\
-    sc_irs = %u \n\
-    sc_iss = %u \n\
-    sc_rxtcur = %u \n\
-    sc_rxttot = %u \n\
-    sc_rxtshift = %hi \n\
-    sc_flags = %hi \n\
-    sc_ipopts = %p \n\
-    sc_peermaxseg = %hu \n\
-    sc_ourmaxseg = %hu \n\
-    sc_request_r_scale = %hhu \n\
-    sc_requested_s_scale = %hhu \n\
-	sc_tp = %p \n\
-    sc_tpq.le_next = %p \n\
-    sc_tpq.le_prev = %p \n\
-",
-    sc.sc_bucketq.tqe_next,
-    sc.sc_bucketq.tqe_prev,
-    sc.sc_timer._c_store[0],
-    sc.sc_timer._c_store[1],
-    sc.sc_route._ro_rt,
-    sc.sc_route.ro_sa,
-    sc.sc_route.ro_invalid,
-    sc.sc_win,
-    sc.sc_bucketidx,
-    sc.sc_hash,
-    sc.sc_timestamp,
-    sc.sc_timebase,
-    sc.sc_src.sin.sin_port,
-    sc.sc_src.sin.sin_addr.s_addr,
-    sc.sc_src.sin.sin_family,
-    sc.sc_dst.sin.sin_port,
-    sc.sc_dst.sin.sin_addr.s_addr,
-    sc.sc_dst.sin.sin_family,
-    sc.sc_irs,
-    sc.sc_iss,
-    sc.sc_rxtcur,
-    sc.sc_rxttot,
-    sc.sc_rxtshift,
-    sc.sc_flags,
-    sc.sc_ipopts,
-    sc.sc_peermaxseg,
-    sc.sc_ourmaxseg,
-    sc.sc_request_r_scale,
-    sc.sc_requested_s_scale,
-	sc.sc_tp,
-    sc.sc_tpq.le_next,
-    sc.sc_tpq.le_prev
-);
-
 	retval = syn_cache_promote(src, dst, th, hlen, tlen, so, m, &sc);
-printf( "syn_cache_promote for syn_cookie_validate returning %p mbuf %p\n", retval, m );
+
 	if (sc.sc_ipopts)
 		(void) m_free(sc.sc_ipopts);
 	rtcache_free(&sc.sc_route);
