@@ -167,9 +167,7 @@ __KERNEL_RCSID(0, "$NetBSD: tcp_input.c,v 1.314 2011/05/25 23:20:57 gdt Exp $");
 #include <sys/pool.h>
 #include <sys/domain.h>
 #include <sys/kernel.h>
-#ifdef TCP_SIGNATURE
 #include <sys/md5.h>
-#endif
 #include <sys/lwp.h> /* for lwp0 */
 
 #include <net/if.h>
@@ -255,12 +253,14 @@ static struct timeval tcp_rst_ppslim_last;
 static int tcp_ackdrop_ppslim_count = 0;
 static struct timeval tcp_ackdrop_ppslim_last;
 
+#define SYNCOOKIE_SECRET_SIZE 8 /* dwords */
+#define SYNCOOKIE_LIFETIME 16 /* seconds */
+
 static struct {
-	u_int32_t refresh_time;
-	u_int32_t idx;
-	u_int32_t *secret[2];
-	u_int32_t *unused_secret;
-	u_int32_t secret_data[3];
+ 	u_int     oddeven;
+ 	u_int32_t secbits_odd[SYNCOOKIE_SECRET_SIZE];
+ 	u_int32_t secbits_even[SYNCOOKIE_SECRET_SIZE];
+ 	u_int     reseed_time; /* time_uptime, seconds */
 	kmutex_t  updating_lock;
 } syn_cookie_secrets;
 
@@ -3749,13 +3749,7 @@ syn_cache_init(void)
 	/* Piggy-back on the syn cache initialization and initialize
 	 * the syn cookie secrets. tcp_now must be initialized before
 	 * syn_cache_init is called. */
-	syn_cookie_secrets.refresh_time = tcp_now;
-	syn_cookie_secrets.secret_data[0] = arc4random();
-	/* secret_data[1] will be initialized before it is used. */
-	syn_cookie_secrets.idx = 0;
-	syn_cookie_secrets.secret[0] = &syn_cookie_secrets.secret_data[0];
-	syn_cookie_secrets.secret[1] = &syn_cookie_secrets.secret_data[1];
-	syn_cookie_secrets.unused_secret = &syn_cookie_secrets.secret_data[2];
+	syn_cookie_secrets.reseed_time = 0;
 	mutex_init( &syn_cookie_secrets.updating_lock, MUTEX_DEFAULT, IPL_SOFTNET );
 }
 
@@ -4927,7 +4921,6 @@ syn_cache_respond(struct syn_cache *sc, struct mbuf *m)
 	return (error);
 }
 
-
 /* TCP SYN cookie implementation, copyright John Eaglesham 2011
  * Blah blah BSD license but it's cool if you buy me a beer too.
  *
@@ -5066,7 +5059,7 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 	sc.sc_ipopts = ipopts;
 	sc.sc_irs = th->th_seq;
 
-	sc.sc_iss = syn_cookie_generate_seq(src, dst, oi->maxseg);
+	sc.sc_iss = syn_cookie_generate_seq(src, dst, oi->maxseg, th->th_seq);
 
 	sc.sc_peermaxseg = oi->maxseg;
 	sc.sc_ourmaxseg = tcp_mss_to_advertise(m->m_flags & M_PKTHDR ?
@@ -5314,9 +5307,9 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	/* This is normally done via SYN_CACHE_TIMER_ARM, but
 	 * since we never call that (or touch the cache timer
 	 * at all, set it here manually. */
-    TCPT_RANGESET(sc.sc_rxtcur,                  \
-        TCPTV_SRTTDFLT * tcp_backoff[sc.sc_rxtshift], TCPTV_MIN, \
-        TCPTV_REXMTMAX);   
+	TCPT_RANGESET(sc.sc_rxtcur,
+		TCPTV_SRTTDFLT * tcp_backoff[sc.sc_rxtshift], TCPTV_MIN,
+		TCPTV_REXMTMAX);   
 
 	retval = syn_cache_promote(src, dst, th, hlen, tlen, so, m, &sc);
 
@@ -5336,86 +5329,80 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
  * reading a variable modified with one of the atomic_ops. But I
  * could be wrong.
  */
-void
+inline void
 syn_cookie_regenerate_secrets(void)
 {
-	if (tcp_now > syn_cookie_secrets.refresh_time + (tcp_keepinit / 2)) {
-		mutex_enter(&syn_cookie_secrets.updating_lock);
-		if (tcp_now > ((volatile u_int32_t)syn_cookie_secrets.refresh_time) + (tcp_keepinit / 2)) {
+	u_int32_t *secbits;
+	int i;
+
+	mutex_enter(&syn_cookie_secrets.updating_lock);
+	if (syn_cookie_secrets.reseed_time < time_uptime ) {
 printf( "Regenerating syn cookie secrets\n" );
-			u_int32_t next_idx = syn_cookie_secrets.idx ? 0 : 1;
-			*syn_cookie_secrets.unused_secret = arc4random();
-			atomic_swap_ptr( &syn_cookie_secrets.secret[next_idx],
-				syn_cookie_secrets.unused_secret);
-			atomic_swap_32( &syn_cookie_secrets.idx, next_idx );
-			atomic_swap_32( &syn_cookie_secrets.refresh_time, tcp_now );
-		}
-		mutex_exit(&syn_cookie_secrets.updating_lock);
+		syn_cookie_secrets.oddeven = syn_cookie_secrets.oddeven ? 0 : 1;
+		secbits = syn_cookie_secrets.oddeven ?
+			syn_cookie_secrets.secbits_odd : syn_cookie_secrets.secbits_even;
+		for (i = 0; i < SYNCOOKIE_SECRET_SIZE; i++)
+			secbits[i] = arc4random();
+		syn_cookie_secrets.reseed_time = time_uptime + SYNCOOKIE_LIFETIME;
 	}
-}
-
-/* The following are functions to create and validate syn cookies.
- * The current implementation is very poor, merely a proof-of-
- * concept. This method uses a simple hash with secret data mixed
- * in. It expects to be able to re-generate that hash given the
- * same input data, thus validating the client.
- */
-
-u_int32_t syn_cookie_hash_secret(struct sockaddr *src,
-	struct sockaddr *dst, u_int32_t secret_idx)
-{
-	u_int32_t retval, secret;
-	syn_cookie_regenerate_secrets();
-
-	retval = secret = *syn_cookie_secrets.secret[secret_idx];
-
-	switch (src->sa_family) {
-#ifdef INET
-	case AF_INET:
-		retval ^= ((struct sockaddr_in *) src)->sin_addr.s_addr;
-		retval += ((struct sockaddr_in *) dst)->sin_addr.s_addr;
-		retval ^= ((((struct sockaddr_in *) src)->sin_port << 16 )
-				& ((struct sockaddr_in *) dst)->sin_port);
-		break;
-#endif
-#ifdef INET6
-	case AF_INET6:
-		retval ^= ((struct sockaddr_in6 *) src)->sin6_addr.__u6_addr.__u6_addr32[3];
-		retval += ((struct sockaddr_in6 *) dst)->sin6_addr.__u6_addr.__u6_addr32[3];
-		retval ^= ((((struct sockaddr_in6 *) src)->sin6_port << 16 )
-				& ((struct sockaddr_in6 *) dst)->sin6_port);
-		break;
-#endif
-	default:
-		/* How could we possibly get here? Someone implemented
-		 * TCP over a layer 3 protocol other than IPv4 or v6 and
-		 * didn't implement syn cookie code.
-		 */ 
-		;
-	}
-	retval += secret;
-	return retval;
+printf( "Done regenerating syn cookie secrets\n" );
+	mutex_exit(&syn_cookie_secrets.updating_lock);
 }
 
 u_int32_t
 syn_cookie_generate_seq(struct sockaddr *src, struct sockaddr *dst,
-	u_int16_t mss)
+	u_int16_t mss, u_int32_t irs)
 {
 	u_int8_t msstab_entry;
 	u_int32_t new_seq;
+	u_int32_t *secbits;
+	MD5_CTX ctx;
+	u_int32_t md5_buffer[MD5_DIGEST_LENGTH / sizeof(u_int32_t)];
+	u_int off;
 
-	for (msstab_entry = 0; msstab_entry < 7; msstab_entry++) {
+printf( "In syn_cookie_generate_seq\n" );
+	syn_cookie_regenerate_secrets();
+	off = arc4random() & 0x7;
+
+	MD5Init(&ctx);
+	for (msstab_entry = 0; msstab_entry < 7; msstab_entry++)
 		if (mss < tcp_sc_msstab[msstab_entry + 1])
 			break;
+	new_seq = ( off << 1 ) | ( mss << 4 );
+
+	mutex_enter(&syn_cookie_secrets.updating_lock);
+	secbits = syn_cookie_secrets.oddeven ?
+		syn_cookie_secrets.secbits_odd : syn_cookie_secrets.secbits_even;
+
+	new_seq |= syn_cookie_secrets.oddeven;
+
+	MD5Update(&ctx, ((char *) secbits) + off,
+		SYNCOOKIE_SECRET_SIZE * sizeof(*secbits) - off);
+	MD5Update(&ctx, (char *) secbits, off);
+	mutex_exit(&syn_cookie_secrets.updating_lock);
+
+	switch (src->sa_family) {
+		case AF_INET:
+			MD5Update(&ctx, (char *) src, sizeof( struct sockaddr_in ) );
+			MD5Update(&ctx, (char *) dst, sizeof( struct sockaddr_in ) );
+			break;
+		case AF_INET6:
+			MD5Update(&ctx, (char *) src, sizeof( struct sockaddr_in6 ) );
+			MD5Update(&ctx, (char *) dst, sizeof( struct sockaddr_in6 ) );
+			break;
+		default:
+			/* How could we possibly get here? Someone implemented
+			 * TCP over a layer 3 protocol other than IPv4 or v6 and
+			 * didn't implement syn cookie code.
+			 */ 
+			;
 	}
 
-	new_seq = syn_cookie_hash_secret(src, dst, syn_cookie_secrets.idx);
-
-printf( "Generated hash = %u, msstab = %i, secret.idx = %i, seq = ", new_seq & 0xFFFFFFF0, msstab_entry, syn_cookie_secrets.idx );
-	new_seq = ( new_seq & 0xFFFFFFF0 )
-			| (msstab_entry << 1)
-			| (syn_cookie_secrets.idx);
-printf( "%u\n", new_seq );
+	MD5Update(&ctx, (char *) &irs, sizeof( irs ) );
+	MD5Update(&ctx, (char *) &new_seq, sizeof( new_seq ) );
+	MD5Final((char *) &md5_buffer, &ctx);
+	new_seq |= md5_buffer[0] << 7;
+printf( "Leaving syn_cookie_generate_seq\n" );
 
 	return new_seq;
 }
@@ -5424,22 +5411,66 @@ u_int16_t
 syn_cookie_check_seq(struct sockaddr *src, struct sockaddr *dst,
 	struct tcphdr *th)
 {
-	u_int32_t expected_seq;
-	u_int32_t recovered_isn = th->th_ack - 1;
-	u_int32_t recovered_secret_idx = recovered_isn & 0x1;
+	u_int32_t ack = th->th_ack - 1;
+	u_int32_t seq = th->th_seq - 1;
+	u_int32_t recovered_oddeven = ack & 0x1;
+	MD5_CTX ctx;
+	u_int32_t *secbits;
+	u_int32_t md5_buffer[MD5_DIGEST_LENGTH / sizeof(u_int32_t)];
 	u_int8_t recovered_msstab_entry;
+	u_int off;
+	u_int32_t flags;
 
-	expected_seq = syn_cookie_hash_secret(src, dst, recovered_secret_idx);
-printf( "Checking seq = %u, expected %u, recovered secret.idx = %i\n", recovered_isn, expected_seq, recovered_secret_idx );
+printf( "Entering syn_cookie_check_seq\n" );
+	off = (ack >> 1) & 0x7;
+	recovered_msstab_entry = (ack >> 4) & 0x7;
+	flags = ack & 0x7F;
 
-	/* Cookies don't match! Get out of here. */
-	if ((expected_seq & 0xFFFFFFF0) != (recovered_isn & 0xFFFFFFF0)) {
-printf( "Check failed.\n" );
+	mutex_enter(&syn_cookie_secrets.updating_lock);
+
+	/* If the secrets haven't been updated in a lifetime then we know we haven't
+	 * sent out any cookies recently and this ACK is too old. */
+	if (syn_cookie_secrets.reseed_time + SYNCOOKIE_LIFETIME < time_uptime) {
+		mutex_exit(&syn_cookie_secrets.updating_lock);
+printf( "Leaving syn_cookie_check_seq (fail 1)\n" );
 		return 0;
 	}
-	recovered_msstab_entry = (recovered_isn & 0x0000000E ) >> 1;
-printf( "Check passed, returning msstab entry = %i\n", recovered_msstab_entry );
 
-	return tcp_sc_msstab[recovered_msstab_entry];
+	secbits = recovered_oddeven ?
+		syn_cookie_secrets.secbits_odd : syn_cookie_secrets.secbits_even;
+
+	MD5Init(&ctx);
+	MD5Update(&ctx, ((char *) secbits) + off,
+		SYNCOOKIE_SECRET_SIZE * sizeof(*secbits) - off);
+	MD5Update(&ctx, (char *) secbits, off);
+	mutex_exit(&syn_cookie_secrets.updating_lock);
+
+	switch (src->sa_family) {
+		case AF_INET:
+			MD5Update(&ctx, (char *) src, sizeof( struct sockaddr_in ) );
+			MD5Update(&ctx, (char *) dst, sizeof( struct sockaddr_in ) );
+			break;
+		case AF_INET6:
+			MD5Update(&ctx, (char *) src, sizeof( struct sockaddr_in6 ) );
+			MD5Update(&ctx, (char *) dst, sizeof( struct sockaddr_in6 ) );
+			break;
+		default:
+			/* How could we possibly get here? Someone implemented
+			 * TCP over a layer 3 protocol other than IPv4 or v6 and
+			 * didn't implement syn cookie code.
+			 */ 
+			;
+	}
+
+	MD5Update(&ctx, (char *) &seq, sizeof( seq ) );
+	MD5Update(&ctx, (char *) &flags, sizeof( flags ) );
+	MD5Final((char *) &md5_buffer, &ctx);
+
+	if ((ack & (~0x7F)) != (md5_buffer[0] << 7)) {
+printf( "Leaving syn_cookie_check_seq (fail 2)\n" );
+		return 0;
 }
 
+printf( "Leaving syn_cookie_check_seq (success)\n" );
+	return tcp_sc_msstab[recovered_msstab_entry];
+}
