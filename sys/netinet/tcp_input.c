@@ -1709,7 +1709,7 @@ findpcb:
 					 */
 					goto badsyn;
 				} else if (tiflags & TH_ACK) {
-					struct socket *oso = so;
+					//struct socket *oso = so;
 					so = syn_cache_get(&src.sa, &dst.sa,
 						th, toff, tlen, so, m);
 //					if (so == NULL)
