@@ -1709,12 +1709,12 @@ findpcb:
 					 */
 					goto badsyn;
 				} else if (tiflags & TH_ACK) {
-					//struct socket *oso = so;
+					struct socket *oso = so;
 					so = syn_cache_get(&src.sa, &dst.sa,
 						th, toff, tlen, so, m);
-//					if (so == NULL)
-//						so = syn_cookie_validate(&src.sa, &dst.sa,
-//							th, toff, tlen, oso, m, optp, optlen);
+					if (so == NULL)
+						so = syn_cookie_validate(&src.sa, &dst.sa,
+							th, toff, tlen, oso, m, optp, optlen);
 					if (so == NULL) {
 						/*
 						 * We don't have a SYN for
@@ -3743,8 +3743,7 @@ syn_cache_init(void)
 		TAILQ_INIT(&tcp_syn_cache[i].sch_bucket);
 
 	/* Piggy-back on the syn cache initialization and initialize
-	 * the syn cookie secrets. tcp_now must be initialized before
-	 * syn_cache_init is called. */
+	 * the syn cookie secrets. */
 	syn_cookie_secrets.reseed_time = 0;
 	mutex_init( &syn_cookie_secrets.updating_lock, MUTEX_DEFAULT, IPL_SOFTNET );
 }
@@ -5151,7 +5150,8 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	 * meaning the cookie is invalid.
 	 */
 	//if ((recovered_mss = syn_cookie_check_seq(src, dst, th)) == 0)
-		return NULL;
+	//	return NULL;
+	recovered_mss = 1400;
 
 	tp = sototcpcb(so);
 
@@ -5349,6 +5349,8 @@ syn_cookie_generate_seq(struct sockaddr *src, struct sockaddr *dst,
 	MD5_CTX ctx;
 	u_int32_t md5_buffer[MD5_DIGEST_LENGTH / sizeof(u_int32_t)];
 	u_int off;
+
+return 12345; // XXX je
 
 printf( "In syn_cookie_generate_seq\n" );
 	syn_cookie_regenerate_secrets();
