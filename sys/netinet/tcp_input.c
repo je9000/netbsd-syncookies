@@ -584,7 +584,7 @@ tcp_reass(struct tcpcb *tp, const struct tcphdr *th, struct mbuf *m, int *tlen)
 		 */
 		if (q->ipqe_seq + q->ipqe_len == pkt_seq) {
 #ifdef TCPREASS_DEBUG
-			Printf("tcp_reass[%p]: concat %u:%u(%u) to %u:%u(%u)\n",
+			printf("tcp_reass[%p]: concat %u:%u(%u) to %u:%u(%u)\n",
 			       tp, pkt_seq, pkt_seq + pkt_len, pkt_len,
 			       q->ipqe_seq, q->ipqe_seq + q->ipqe_len, q->ipqe_len);
 #endif
@@ -1257,7 +1257,6 @@ tcp_input(struct mbuf *m, ...)
 	short ostate = 0;
 #endif
 	u_long tiwin;
-
 	struct tcp_opt_info opti;
 	int off, iphlen;
 	va_list ap;
@@ -1713,9 +1712,9 @@ findpcb:
 					struct socket *oso = so;
 					so = syn_cache_get(&src.sa, &dst.sa,
 						th, toff, tlen, so, m);
-					if (so == NULL)
-						so = syn_cookie_validate(&src.sa, &dst.sa,
-	                        th, toff, tlen, oso, m, optp, optlen);
+//					if (so == NULL)
+//						so = syn_cookie_validate(&src.sa, &dst.sa,
+//							th, toff, tlen, oso, m, optp, optlen);
 					if (so == NULL) {
 						/*
 						 * We don't have a SYN for
@@ -1928,7 +1927,6 @@ after_listen:
 	 * Reset idle time and keep-alive timer.
 	 */
 	tp->t_rcvtime = tcp_now;
-
 	if (TCPS_HAVEESTABLISHED(tp->t_state))
 		TCP_TIMER_ARM(tp, TCPT_KEEP, tp->t_keepidle);
 
@@ -2041,7 +2039,6 @@ after_listen:
 			    SEQ_LEQ(th->th_ack, tp->snd_max) &&
 			    tp->snd_cwnd >= tp->snd_wnd &&
 			    tp->t_partialacks < 0) {
-
 				/*
 				 * this is a pure ack for outstanding data.
 				 */
@@ -2384,7 +2381,6 @@ after_listen:
 			tcps[TCP_STAT_PAWSDROP]++;
 			TCP_STAT_PUTREF();
 			tcp_new_dsack(tp, th->th_seq, tlen);
-
 			goto dropafterack;
 		}
 	}
@@ -4513,7 +4509,6 @@ syn_cache_add(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 	sc->sc_flags = 0;
 	sc->sc_ipopts = ipopts;
 	sc->sc_irs = th->th_seq;
-
 	switch (src->sa_family) {
 #ifdef INET
 	case AF_INET:
@@ -4540,7 +4535,6 @@ syn_cache_add(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 	    }
 #endif /* INET6 */
 	}
-
 	sc->sc_peermaxseg = oi->maxseg;
 	sc->sc_ourmaxseg = tcp_mss_to_advertise(m->m_flags & M_PKTHDR ?
 						m->m_pkthdr.rcvif : NULL,
@@ -4548,11 +4542,9 @@ syn_cache_add(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 	sc->sc_win = win;
 	sc->sc_timebase = tcp_now - 1;	/* see tcp_newtcpcb() */
 	sc->sc_timestamp = tb.ts_recent;
-
 	if ((tb.t_flags & (TF_REQ_TSTMP|TF_RCVD_TSTMP)) ==
 	    (TF_REQ_TSTMP|TF_RCVD_TSTMP))
 		sc->sc_flags |= SCF_TIMESTAMP;
-
 	if ((tb.t_flags & (TF_RCVD_SCALE|TF_REQ_SCALE)) ==
 	    (TF_RCVD_SCALE|TF_REQ_SCALE)) {
 		sc->sc_requested_s_scale = tb.requested_s_scale;
@@ -4598,7 +4590,6 @@ syn_cache_add(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 		sc->sc_flags |= SCF_SIGNATURE;
 #endif
 	sc->sc_tp = tp;
-
 	if (syn_cache_respond(sc, m) == 0) {
 		uint64_t *tcps = TCP_STAT_GETREF();
 		tcps[TCP_STAT_SNDACKS]++;
@@ -4639,7 +4630,6 @@ syn_cache_respond(struct syn_cache *sc, struct mbuf *m)
 	struct socket *so;
 
 	ro = &sc->sc_route;
-
 	switch (sc->sc_src.sa.sa_family) {
 	case AF_INET:
 		hlen = sizeof(struct ip);
@@ -5160,7 +5150,7 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	 * original mss (meaning we couldn't decode the ISN,
 	 * meaning the cookie is invalid.
 	 */
-	if ((recovered_mss = syn_cookie_check_seq(src, dst, th)) == 0)
+	//if ((recovered_mss = syn_cookie_check_seq(src, dst, th)) == 0)
 		return NULL;
 
 	tp = sototcpcb(so);
