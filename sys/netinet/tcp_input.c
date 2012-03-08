@@ -4171,9 +4171,6 @@ syn_cache_promote(struct sockaddr *src, struct sockaddr *dst,
 		goto resetandabort;
 	MCLAIM(am, &tcp_mowner);
 	am->m_len = src->sa_len;
-//printf("Setting up in_pcbconnect with am = %p, len = %i, fam = %i, sin_addr = %i ->", am, src->sa_len, src->sa_family, ((struct sockaddr_in *)src)->sin_addr.s_addr );
-//for(int x = 0; x < src->sa_len; x++ ) printf("%02X ", (unsigned char) src->sa_data[x] );
-//printf("<-\n");
 	bcopy(src, mtod(am, void *), src->sa_len);
 	if (inp) {
 		if (in_pcbconnect(inp, am, &lwp0)) {
@@ -4233,7 +4230,6 @@ syn_cache_promote(struct sockaddr *src, struct sockaddr *dst,
 	if (tp->t_template == 0) {
 		tp = tcp_drop(tp, ENOBUFS);	/* destroys socket */
 		so = NULL;
-printf("Double free of mbuf m\n");
 		m_freem(m); /* Double free of m XXX --je */
 		goto abort;
 	}
@@ -4299,10 +4295,6 @@ printf("Double free of mbuf m\n");
 	tp->t_dupacks = 0;
 
 	TCP_STATINC(TCP_STAT_SC_COMPLETED);
-//printf("returning from _promote with %i bytes of mbuf data, flags = %i, type = %i -> ", m->m_len, m->m_flags, m->m_type );
-//for(int x = 0; x < m->m_len; x++ ) printf("%02X ", (unsigned int)mtod(m, unsigned char*)[x] );
-//printf("<-\n");
-// XXX je
 	return (so);
 
 resetandabort:
@@ -4910,71 +4902,36 @@ syn_cache_respond(struct syn_cache *sc, struct mbuf *m)
 	return (error);
 }
 
-/* TCP SYN cookie implementation, copyright John Eaglesham 2011
- * Blah blah BSD license but it's cool if you buy me a beer too.
+/* TCP SYN cookie implementation, based on FreeBSD 9.0's syn cookie
+ * implementation (minus the timestamp stuff):
  *
- * SYN cookies are implemented along side the SYN cache. Inside
- * the SYN+ACK initial sequence number we place 3 items:
+ * Initial sequence number we send:
+ * 31|................................|0
+ * DDDDDDDDDDDDDDDDDDDDDDDDDMMMRRRP
+ * D = MD5 Digest (first dword)
+ * M = MSS index
+ * R = Rotation of secret
+ * P = Odd or Even secret
  *
- *  0                   1                   2                   3   
- *  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 
- * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- * |i| MSS |    hash(src ip, src port, dst ip, dst port, secret)   |
- * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ * The MD5 Digest is computed with over following parameters:
+ * a) randomly rotated secret
+ * b) struct in_conninfo containing the remote/local ip/port (IPv4&IPv6)
+ * c) the received initial sequence number from remote host
+ * d) the rotation offset and odd/even bit
  *
- * The bottom bit is an index into a table of possible secrets.
- * The index is swapped every net.inet.tcp.keepinit/2 hz and the
- * older secret is then changed. This means clients have
- * net.inet.tcp.keepinit hz (default 75 seconds) to respond before
- * the secret used in their cookie becomes invalid.
+ * Note:
  *
- * The next three bits represent an index into a fixed table of
- * possible MSS values. The largest entry in this table is chosen
- * that does not exceed the MSS sent by the client.
+ * For some reason we get a panic if we allocate sc on the stack rather
+ * than dynamically (even if we zero out and free a dynamic sc later on). I
+ * can't figure out why this is. It would probably be slightly faster to have
+ * sc live on the stack rather than be dynamically allocated, but it doesn't
+ * matter so much.
  *
- * The remaining 28 bits consist of a "cookie" which allows us to
- * validate this packet was set by us. The implementation of this
- * cookie is subject to change, see the documented functions below.
- *
- * When possible we will encode further information into the TCP
- * timestamp field as follows:
- *
- *  0                   1                   2                   3   
- *  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 
- * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- * | R Scale |E|S|T|    Unused     |       Original client MSS     |
- * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- *
- * Please note that the bits are not in this order on the wire.
- * This diagram shows only the logical layout and the on-wire
- * format is endian-dependent.
- *
- * The bottom 4 bits are the bottom 4 bits of the client's
- * requested window scaling factor (4 bits are enough to cover all
- * valid values).
- *
- * Bit 5 specifies whether client is ECN capable.
- *
- * Bit 6 specifies whether client is SACK capable.
- *
- * Bit 7 specifies whether client has requested TCP timestamps.
- *
- * Bits 8 through 15 are unsused (though may hold the TCP signature
- * flag in the future).
- *
- * This data can be used to reproduce the original client request
- * almost exactly and will (supersede the MSS recovered from the
- * ISN). Currently, this header is only sent when the client asks
- * for TCP timestamps, though I believe we can send it whenever a
- * client sends any RFC 1323 option. Quick testing shows not all
- * clients will respond, but researching this is a TODO.
- */
-
-/* XXX TODO:
+ * TODO:
  *
  * Don't bother setting variables syn_cache_reply won't check.
  *
- * Do we need to do that route cache stuff?
+ * Do we need to do the route cache stuff?
  *
  * --je
  */
@@ -4985,9 +4942,10 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 {
 	struct tcpcb tb, *tp;
 	long win;
-	struct syn_cache sc;
+	struct syn_cache *sc;
 	struct mbuf *ipopts;
 	struct tcp_opt_info opti;
+	int s;
 
 	tp = sototcpcb(so);
 
@@ -5036,40 +4994,50 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 	} else
 		tb.t_flags = 0;
 
+	s = splsoftnet();
+	sc = pool_get(&syn_cache_pool, PR_NOWAIT);
+	splx(s);
+	if (sc == NULL) {
+		if (ipopts)
+			(void) m_free(ipopts);
+		return (0);
+	}
+
 	/*
 	 * Fill in the cache, and put the necessary IP and TCP
 	 * options into the reply.
 	 */
-	memset(&sc, 0, sizeof(struct syn_cache));
-	callout_init(&sc.sc_timer, CALLOUT_MPSAFE);
-	bcopy(src, &sc.sc_src, src->sa_len);
-	bcopy(dst, &sc.sc_dst, dst->sa_len);
-	sc.sc_flags = 0;
-	sc.sc_ipopts = ipopts;
-	sc.sc_irs = th->th_seq;
+	memset(sc, 0, sizeof(struct syn_cache));
+	/* We don't touch sc->sc_timer because syn_cache_respond doesn't either. */
+	bcopy(src, &sc->sc_src, src->sa_len);
+	bcopy(dst, &sc->sc_dst, dst->sa_len);
+	sc->sc_flags = 0;
+	sc->sc_ipopts = ipopts;
+	sc->sc_irs = th->th_seq;
 
-	sc.sc_iss = syn_cookie_generate_seq(src, dst, oi->maxseg, th->th_seq);
+	sc->sc_iss = syn_cookie_generate_seq(src, dst, oi->maxseg, th->th_seq);
 
-	sc.sc_peermaxseg = oi->maxseg;
-	sc.sc_ourmaxseg = tcp_mss_to_advertise(m->m_flags & M_PKTHDR ?
+	sc->sc_peermaxseg = oi->maxseg;
+	sc->sc_ourmaxseg = tcp_mss_to_advertise(m->m_flags & M_PKTHDR ?
 						m->m_pkthdr.rcvif : NULL,
-						sc.sc_src.sa.sa_family);
-	sc.sc_win = win;
-	sc.sc_timebase = tcp_now - 1;	/* see tcp_newtcpcb() */
-	sc.sc_timestamp = (oi->maxseg << 16)
-			| ((th->th_flags & (TH_ECE|TH_CWR) ? 1 : 0) << 4)
-			| ((tb.t_flags & TF_SACK_PERMIT ? 1 : 0) << 5)
-			| ((tb.t_flags & (TF_REQ_TSTMP|TF_RCVD_TSTMP) ? 1 : 0) << 6)
-			| (tb.requested_s_scale & 0xF);
+						sc->sc_src.sa.sa_family);
+	sc->sc_win = win;
+	sc->sc_timebase = tcp_now - 1;	/* see tcp_newtcpcb() */
+	sc->sc_timestamp = tb.ts_recent;
+//	sc->sc_timestamp = (oi->maxseg << 16)
+//			| ((th->th_flags & (TH_ECE|TH_CWR) ? 1 : 0) << 4)
+//			| ((tb.t_flags & TF_SACK_PERMIT ? 1 : 0) << 5)
+//			| ((tb.t_flags & (TF_REQ_TSTMP|TF_RCVD_TSTMP) ? 1 : 0) << 6)
+//			| (tb.requested_s_scale & 0xF);
 
 	if ((tb.t_flags & (TF_REQ_TSTMP|TF_RCVD_TSTMP)) ==
 	    (TF_REQ_TSTMP|TF_RCVD_TSTMP))
-		sc.sc_flags |= SCF_TIMESTAMP;
+		sc->sc_flags |= SCF_TIMESTAMP;
 
 	if ((tb.t_flags & (TF_RCVD_SCALE|TF_REQ_SCALE)) ==
 	    (TF_RCVD_SCALE|TF_REQ_SCALE)) {
-		sc.sc_requested_s_scale = tb.requested_s_scale;
-		sc.sc_request_r_scale = 0;
+		sc->sc_requested_s_scale = tb.requested_s_scale;
+		sc->sc_request_r_scale = 0;
 		/*
 		 * Pick the smallest possible scaling factor that
 		 * will still allow us to scale up to sb_max.
@@ -5090,37 +5058,41 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 		 * RFC1323: The Window field in a SYN (i.e., a <SYN>
 		 * or <SYN,ACK>) segment itself is never scaled.
 		 */
-		while (sc.sc_request_r_scale < TCP_MAX_WINSHIFT &&
-		    (TCP_MAXWIN << sc.sc_request_r_scale) < sb_max)
-			sc.sc_request_r_scale++;
+		while (sc->sc_request_r_scale < TCP_MAX_WINSHIFT &&
+		    (TCP_MAXWIN << sc->sc_request_r_scale) < sb_max)
+			sc->sc_request_r_scale++;
 	} else {
-		sc.sc_requested_s_scale = 15;
-		sc.sc_request_r_scale = 15;
+		sc->sc_requested_s_scale = 15;
+		sc->sc_request_r_scale = 15;
 	}
 	if ((tb.t_flags & TF_SACK_PERMIT) && tcp_do_sack)
-		sc.sc_flags |= SCF_SACK_PERMIT;
+		sc->sc_flags |= SCF_SACK_PERMIT;
 
 	/*
 	 * ECN setup packet recieved.
 	 */
 	if ((th->th_flags & (TH_ECE|TH_CWR)) && tcp_do_ecn)
-		sc.sc_flags |= SCF_ECN_PERMIT;
+		sc->sc_flags |= SCF_ECN_PERMIT;
 
 #ifdef TCP_SIGNATURE
 	if (tb.t_flags & TF_SIGNATURE)
-		sc.sc_flags |= SCF_SIGNATURE;
+		sc->sc_flags |= SCF_SIGNATURE;
 #endif
-	sc.sc_tp = tp;
+	sc->sc_tp = tp;
 
-	if (syn_cache_respond(&sc, m) == 0) {
+	if (syn_cache_respond(sc, m) == 0) {
 		uint64_t *tcps = TCP_STAT_GETREF();
+		/* XXX This isn't the right TCP_STAT to increment --je */
 		tcps[TCP_STAT_SNDACKS]++;
 		tcps[TCP_STAT_SNDTOTAL]++;
 		TCP_STAT_PUTREF();
 	} else {
-		/* XXX This isn't the right TCP_STAT to increment --je */
 		TCP_STATINC(TCP_STAT_SC_DROPPED);
 	}
+
+	s = splsoftnet();
+	pool_put(&syn_cache_pool, sc);
+	splx(s);
 	return (1);
 }
 
@@ -5137,21 +5109,13 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	u_int16_t recovered_mss;
 	long ourwin;
 	struct socket *retval;
-	/* 15 is the flag for "no scaling". Probably should be a
-	 * named constant of some sort. XXX --je
-	 */
-	u_int16_t recovered_requested_s_scale = 15;
-	u_int8_t recovered_do_sack = 0;
-	u_int8_t recovered_do_ecn = 0;
-	u_int8_t recovered_do_ts = 0;
 
 	/* The return value will be 0 if we could not recover the
 	 * original mss (meaning we couldn't decode the ISN,
 	 * meaning the cookie is invalid.
 	 */
-	//if ((recovered_mss = syn_cookie_check_seq(src, dst, th)) == 0)
-	//	return NULL;
-	recovered_mss = 1400;
+	if ((recovered_mss = syn_cookie_check_seq(src, dst, th)) == 0)
+		return NULL;
 
 	tp = sototcpcb(so);
 
@@ -5179,27 +5143,6 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	} else
 		tb.t_flags = 0;
 
-	/* tcp_dooptions will not set the appropriate flags inside
-	 * the tcpcb unless the timestamp was received along with a
-	 * SYN flag. With a SYN cookie reply that will never happen,
-	 * so lets put the flags in place manually. Note that this
-	 * condition only applies to timestamps; we won't see any
-	 * other header options appear this way (but they may appear
-	 * as flags set inside the timestamp header sent by us!).
-	 */
-	if (oi.ts_present) {
-		recovered_mss = oi.ts_ecr >> 16;
-		recovered_requested_s_scale = oi.ts_ecr & 0x0F;
-		recovered_do_sack = oi.ts_ecr & 0x10;
-		recovered_do_ecn = oi.ts_ecr & 0x20;
-		recovered_do_ts = oi.ts_ecr & 0x30;
-		if (recovered_do_ts) {
-			tb.t_flags |= TF_RCVD_TSTMP|TF_REQ_TSTMP;
-			tb.ts_recent = oi.ts_val;
-			tb.ts_recent_age = tcp_now;
-		}
-	}
-
 	/*
 	 * Fill in the cache, and put the necessary IP and TCP
 	 * options into the reply.
@@ -5210,6 +5153,8 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	bcopy(dst, &sc.sc_dst, dst->sa_len);
 	sc.sc_flags = 0;
 	sc.sc_ipopts = ipopts;
+	// I'll be honest, I don't know what this is, but nothing seems to use it. --je
+	sc.sc_tp = NULL;
 
 	/* XXX testing --je
 	 */
@@ -5243,56 +5188,13 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	    (TF_REQ_TSTMP|TF_RCVD_TSTMP))
 		sc.sc_flags |= SCF_TIMESTAMP;
 
-	/* If we were able to recover the requested window scaling
-	 * factor then set the appropriate flags in the tcpcb.
-	 */
-	if (recovered_requested_s_scale < 15) {
-		tb.t_flags = (TF_RCVD_SCALE|TF_REQ_SCALE);
-		sc.sc_requested_s_scale = recovered_requested_s_scale;
-		sc.sc_request_r_scale = 0;
-		/*
-		 * Pick the smallest possible scaling factor that
-		 * will still allow us to scale up to sb_max.
-		 *
-		 * We do this because there are broken firewalls that
-		 * will corrupt the window scale option, leading to
-		 * the other endpoint believing that our advertised
-		 * window is unscaled.  At scale factors larger than
-		 * 5 the unscaled window will drop below 1500 bytes,
-		 * leading to serious problems when traversing these
-		 * broken firewalls.
-		 *
-		 * With the default sbmax of 256K, a scale factor
-		 * of 3 will be chosen by this algorithm.  Those who
-		 * choose a larger sbmax should watch out
-		 * for the compatiblity problems mentioned above.
-		 *
-		 * RFC1323: The Window field in a SYN (i.e., a <SYN>
-		 * or <SYN,ACK>) segment itself is never scaled.
-		 */
-		while (sc.sc_request_r_scale < TCP_MAX_WINSHIFT &&
-		    (TCP_MAXWIN << sc.sc_request_r_scale) < sb_max)
-			sc.sc_request_r_scale++;
-	} else {
-		sc.sc_requested_s_scale = 15;
-		sc.sc_request_r_scale = 15;
-	}
-
-	if (recovered_do_sack && tcp_do_sack)
-		sc.sc_flags |= SCF_SACK_PERMIT;
-
-	/*
-	 * ECN setup packet recieved.
-	 */
-	if (recovered_do_ecn && tcp_do_ecn)
-		sc.sc_flags |= SCF_ECN_PERMIT;
+	sc.sc_requested_s_scale = 15;
+	sc.sc_request_r_scale = 15;
 
 #ifdef TCP_SIGNATURE
 	if (tb.t_flags & TF_SIGNATURE)
 		sc.sc_flags |= SCF_SIGNATURE;
 #endif
-	//sc.sc_tp = tp;
-	sc.sc_tp = NULL; // why?? --je
 
 	/* This is normally done via SYN_CACHE_TIMER_ARM, but
 	 * since we never call that (or touch the cache timer
@@ -5326,8 +5228,7 @@ syn_cookie_regenerate_secrets(void)
 	int i;
 
 	mutex_enter(&syn_cookie_secrets.updating_lock);
-	if (syn_cookie_secrets.reseed_time < time_uptime ) {
-printf( "Regenerating syn cookie secrets\n" );
+	if (syn_cookie_secrets.reseed_time <= time_uptime) {
 		syn_cookie_secrets.oddeven = syn_cookie_secrets.oddeven ? 0 : 1;
 		secbits = syn_cookie_secrets.oddeven ?
 			syn_cookie_secrets.secbits_odd : syn_cookie_secrets.secbits_even;
@@ -5335,7 +5236,6 @@ printf( "Regenerating syn cookie secrets\n" );
 			secbits[i] = arc4random();
 		syn_cookie_secrets.reseed_time = time_uptime + SYNCOOKIE_LIFETIME;
 	}
-printf( "Done regenerating syn cookie secrets\n" );
 	mutex_exit(&syn_cookie_secrets.updating_lock);
 }
 
@@ -5350,9 +5250,6 @@ syn_cookie_generate_seq(struct sockaddr *src, struct sockaddr *dst,
 	u_int32_t md5_buffer[MD5_DIGEST_LENGTH / sizeof(u_int32_t)];
 	u_int off;
 
-return 12345; // XXX je
-
-printf( "In syn_cookie_generate_seq\n" );
 	syn_cookie_regenerate_secrets();
 	off = arc4random() & 0x7;
 
@@ -5360,9 +5257,10 @@ printf( "In syn_cookie_generate_seq\n" );
 	for (msstab_entry = 0; msstab_entry < 7; msstab_entry++)
 		if (mss < tcp_sc_msstab[msstab_entry + 1])
 			break;
-	new_seq = ( off << 1 ) | ( mss << 4 );
+	new_seq = ( off << 1 ) | ( msstab_entry << 4 );
 
 	mutex_enter(&syn_cookie_secrets.updating_lock);
+
 	secbits = syn_cookie_secrets.oddeven ?
 		syn_cookie_secrets.secbits_odd : syn_cookie_secrets.secbits_even;
 
@@ -5371,30 +5269,16 @@ printf( "In syn_cookie_generate_seq\n" );
 	MD5Update(&ctx, ((char *) secbits) + off,
 		SYNCOOKIE_SECRET_SIZE * sizeof(*secbits) - off);
 	MD5Update(&ctx, (char *) secbits, off);
+
 	mutex_exit(&syn_cookie_secrets.updating_lock);
 
-	switch (src->sa_family) {
-		case AF_INET:
-			MD5Update(&ctx, (char *) src, sizeof( struct sockaddr_in ) );
-			MD5Update(&ctx, (char *) dst, sizeof( struct sockaddr_in ) );
-			break;
-		case AF_INET6:
-			MD5Update(&ctx, (char *) src, sizeof( struct sockaddr_in6 ) );
-			MD5Update(&ctx, (char *) dst, sizeof( struct sockaddr_in6 ) );
-			break;
-		default:
-			/* How could we possibly get here? Someone implemented
-			 * TCP over a layer 3 protocol other than IPv4 or v6 and
-			 * didn't implement syn cookie code.
-			 */ 
-			;
-	}
+	MD5Update(&ctx, (char *) src, src->sa_len );
+	MD5Update(&ctx, (char *) dst, dst->sa_len );
 
 	MD5Update(&ctx, (char *) &irs, sizeof( irs ) );
 	MD5Update(&ctx, (char *) &new_seq, sizeof( new_seq ) );
 	MD5Final((char *) &md5_buffer, &ctx);
 	new_seq |= md5_buffer[0] << 7;
-printf( "Leaving syn_cookie_generate_seq\n" );
 
 	return new_seq;
 }
@@ -5413,7 +5297,6 @@ syn_cookie_check_seq(struct sockaddr *src, struct sockaddr *dst,
 	u_int off;
 	u_int32_t flags;
 
-printf( "Entering syn_cookie_check_seq\n" );
 	off = (ack >> 1) & 0x7;
 	recovered_msstab_entry = (ack >> 4) & 0x7;
 	flags = ack & 0x7F;
@@ -5424,7 +5307,6 @@ printf( "Entering syn_cookie_check_seq\n" );
 	 * sent out any cookies recently and this ACK is too old. */
 	if (syn_cookie_secrets.reseed_time + SYNCOOKIE_LIFETIME < time_uptime) {
 		mutex_exit(&syn_cookie_secrets.updating_lock);
-printf( "Leaving syn_cookie_check_seq (fail 1)\n" );
 		return 0;
 	}
 
@@ -5437,32 +5319,18 @@ printf( "Leaving syn_cookie_check_seq (fail 1)\n" );
 	MD5Update(&ctx, (char *) secbits, off);
 	mutex_exit(&syn_cookie_secrets.updating_lock);
 
-	switch (src->sa_family) {
-		case AF_INET:
-			MD5Update(&ctx, (char *) src, sizeof( struct sockaddr_in ) );
-			MD5Update(&ctx, (char *) dst, sizeof( struct sockaddr_in ) );
-			break;
-		case AF_INET6:
-			MD5Update(&ctx, (char *) src, sizeof( struct sockaddr_in6 ) );
-			MD5Update(&ctx, (char *) dst, sizeof( struct sockaddr_in6 ) );
-			break;
-		default:
-			/* How could we possibly get here? Someone implemented
-			 * TCP over a layer 3 protocol other than IPv4 or v6 and
-			 * didn't implement syn cookie code.
-			 */ 
-			;
-	}
+	MD5Update(&ctx, (char *) src, src->sa_len );
+	MD5Update(&ctx, (char *) dst, dst->sa_len );
 
 	MD5Update(&ctx, (char *) &seq, sizeof( seq ) );
 	MD5Update(&ctx, (char *) &flags, sizeof( flags ) );
 	MD5Final((char *) &md5_buffer, &ctx);
 
-	if ((ack & (~0x7F)) != (md5_buffer[0] << 7)) {
-printf( "Leaving syn_cookie_check_seq (fail 2)\n" );
-		return 0;
-}
 
-printf( "Leaving syn_cookie_check_seq (success)\n" );
+	if ((ack & (~0x7F)) != (md5_buffer[0] << 7)) {
+		return 0;
+	}
+
 	return tcp_sc_msstab[recovered_msstab_entry];
 }
+
