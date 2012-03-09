@@ -4230,7 +4230,7 @@ syn_cache_promote(struct sockaddr *src, struct sockaddr *dst,
 	if (tp->t_template == 0) {
 		tp = tcp_drop(tp, ENOBUFS);	/* destroys socket */
 		so = NULL;
-		m_freem(m); /* Double free of m XXX --je */
+		m_freem(m);
 		goto abort;
 	}
 
