@@ -5213,14 +5213,6 @@ syn_cookie_validate(struct sockaddr *src, struct sockaddr *dst,
 	return retval;
 }
 
-/* This could be called every tick instead of on every cookie
- * generated (or some combination of the two).
- *
- * It appears the atomic_ops implement both acquire and release
- * semantics, so I shouldn't need to do anything special when
- * reading a variable modified with one of the atomic_ops. But I
- * could be wrong.
- */
 inline void
 syn_cookie_regenerate_secrets(void)
 {
