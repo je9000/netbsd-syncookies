@@ -890,7 +890,7 @@ extern int tcp_autosndbuf_max;
 	{ 0 },					\
 	{ 0 },					\
 	{ 0 },					\
-	{ 1, 0, &syn_cookies },		\
+	{ 1, 0, &syn_cookies },			\
 }
 
 struct secasvar;
