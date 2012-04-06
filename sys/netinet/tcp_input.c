@@ -4303,10 +4303,6 @@ abort:
 	if (so != NULL) {
 		(void) soqremque(so, 1);
 		(void) soabort(so);
-		/* Why do we acquire this lock here? We don't release it
-		 * here or in tcp_input. Who is supposed to release this?
-		 * XXX --je
-		 */
 		mutex_enter(softnet_lock);
 	}
 	TCP_STATINC(TCP_STAT_SC_ABORTED);
@@ -5091,6 +5087,7 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 	}
 
 	s = splsoftnet();
+	memset(sc, 'A', sizeof( *sc ) );
 	pool_put(&syn_cache_pool, sc);
 	splx(s);
 	return (1);
