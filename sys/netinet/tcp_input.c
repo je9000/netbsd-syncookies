@@ -4064,7 +4064,6 @@ syn_cache_promote(struct sockaddr *src, struct sockaddr *dst,
 #ifdef INET
 	case AF_INET:
 		inp = sotoinpcb(so);
-		/* XXX Check if this was successful? --je */
 		break;
 #endif
 #ifdef INET6
@@ -4927,7 +4926,7 @@ syn_cache_respond(struct syn_cache *sc, struct mbuf *m)
  *
  * Don't bother setting variables syn_cache_reply won't check.
  *
- * Do we need to do the route cache stuff?
+ * Figure out what to do with route cache stuff?
  *
  * --je
  */
