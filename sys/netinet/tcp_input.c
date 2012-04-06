@@ -5086,7 +5086,6 @@ syn_cookie_reply(struct sockaddr *src, struct sockaddr *dst, struct tcphdr *th,
 	}
 
 	s = splsoftnet();
-	memset(sc, 'A', sizeof( *sc ) );
 	pool_put(&syn_cache_pool, sc);
 	splx(s);
 	return (1);
